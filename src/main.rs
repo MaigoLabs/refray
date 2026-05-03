@@ -1,5 +1,6 @@
 mod config;
 mod git;
+mod interactive;
 mod provider;
 mod sync;
 
@@ -35,6 +36,7 @@ enum Command {
 #[derive(Subcommand, Debug)]
 enum ConfigCommand {
     Init,
+    Wizard,
     #[command(subcommand)]
     Site(SiteCommand),
     #[command(subcommand)]
@@ -163,6 +165,7 @@ fn handle_config(command: ConfigCommand, path: PathBuf) -> Result<()> {
             println!("created {}", path.display());
             Ok(())
         }
+        ConfigCommand::Wizard => interactive::run_config_wizard(&path),
         ConfigCommand::Site(command) => handle_site(command, path),
         ConfigCommand::Mirror(command) => handle_mirror(command, path),
         ConfigCommand::Show => {
@@ -334,6 +337,16 @@ mod tests {
                 "gitea:user:azalea".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn cli_accepts_config_wizard() {
+        let cli = Cli::try_parse_from(["git-sync", "config", "wizard"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Config(ConfigCommand::Wizard)
+        ));
     }
 
     #[test]

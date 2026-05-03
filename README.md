@@ -26,6 +26,14 @@ Create the config file:
 git-sync config init
 ```
 
+Or use the interactive wizard, which can create or update the same config file:
+
+```sh
+git-sync config wizard
+```
+
+The wizard asks for the provider first, suggests a site name from that provider, stores the PAT directly in the config file, and validates the PAT against the provider before saving the site.
+
 Add sites. Prefer `--token-env` so PATs do not live in shell history or the config file.
 
 ```sh
