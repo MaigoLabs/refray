@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use console::style;
 
 #[derive(Clone, Debug)]
 pub struct RemoteSpec {
@@ -17,6 +20,7 @@ pub struct BranchDecision {
     pub branch: String,
     pub sha: String,
     pub source_remotes: Vec<String>,
+    pub target_remotes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +34,7 @@ pub struct TagDecision {
     pub tag: String,
     pub sha: String,
     pub source_remotes: Vec<String>,
+    pub target_remotes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,7 +58,11 @@ impl GitMirror {
     pub fn open(path: PathBuf, redactor: Redactor, dry_run: bool) -> Result<Self> {
         if !path.exists() {
             if dry_run {
-                println!("dry-run: git init --bare {}", path.display());
+                println!(
+                    "  {} git init --bare {}",
+                    style("dry-run").yellow().bold(),
+                    style(path.display()).dim()
+                );
                 return Ok(Self {
                     path,
                     redactor,
@@ -85,7 +94,11 @@ impl GitMirror {
     pub fn fetch_remote(&self, remote: &RemoteSpec) -> Result<()> {
         let branch_refspec = format!("+refs/heads/*:refs/remotes/{}/*", remote.name);
         let tag_refspec = format!("+refs/tags/*:refs/remote-tags/{}/*", remote.name);
-        println!("fetching {}", remote.display);
+        println!(
+            "  {} {}",
+            style("fetch").cyan().bold(),
+            style(&remote.display).dim()
+        );
         self.run(["fetch", "--prune", &remote.name, &branch_refspec])?;
         self.run(["fetch", "--prune", &remote.name, &tag_refspec])
     }
@@ -107,6 +120,10 @@ impl GitMirror {
 
         let mut decisions = Vec::new();
         let mut conflicts = Vec::new();
+        let all_remote_names = remotes
+            .iter()
+            .map(|remote| remote.name.clone())
+            .collect::<Vec<_>>();
 
         for (branch, tips) in by_branch {
             let unique = tips
@@ -114,34 +131,46 @@ impl GitMirror {
                 .map(|(_, sha)| sha.clone())
                 .collect::<BTreeSet<_>>();
             if unique.len() == 1 {
+                let source_remotes = tips
+                    .into_iter()
+                    .map(|(remote, _)| remote)
+                    .collect::<Vec<_>>();
+                let target_remotes = missing_remotes(&all_remote_names, &source_remotes);
                 decisions.push(BranchDecision {
                     branch,
                     sha: unique.into_iter().next().unwrap(),
-                    source_remotes: tips.into_iter().map(|(remote, _)| remote).collect(),
+                    source_remotes,
+                    target_remotes,
                 });
                 continue;
             }
 
             if let Some(winner) = self.fast_forward_winner(unique.iter())? {
                 let source_remotes = tips
-                    .into_iter()
-                    .filter_map(|(remote, sha)| (sha == winner).then_some(remote))
-                    .collect();
+                    .iter()
+                    .filter_map(|(remote, sha)| (sha == &winner).then_some(remote))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let target_remotes = missing_remotes(&all_remote_names, &source_remotes);
                 decisions.push(BranchDecision {
                     branch,
                     sha: winner,
                     source_remotes,
+                    target_remotes,
                 });
             } else if allow_force {
                 let winner = self.newest_commit(unique.iter())?;
                 let source_remotes = tips
-                    .into_iter()
-                    .filter_map(|(remote, sha)| (sha == winner).then_some(remote))
-                    .collect();
+                    .iter()
+                    .filter_map(|(remote, sha)| (sha == &winner).then_some(remote))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let target_remotes = missing_remotes(&all_remote_names, &source_remotes);
                 decisions.push(BranchDecision {
                     branch,
                     sha: winner,
                     source_remotes,
+                    target_remotes,
                 });
             } else {
                 conflicts.push(BranchConflict { branch, tips });
@@ -167,6 +196,10 @@ impl GitMirror {
 
         let mut decisions = Vec::new();
         let mut conflicts = Vec::new();
+        let all_remote_names = remotes
+            .iter()
+            .map(|remote| remote.name.clone())
+            .collect::<Vec<_>>();
 
         for (tag, tips) in by_tag {
             let unique = tips
@@ -174,10 +207,16 @@ impl GitMirror {
                 .map(|(_, sha)| sha.clone())
                 .collect::<BTreeSet<_>>();
             if unique.len() == 1 {
+                let source_remotes = tips
+                    .into_iter()
+                    .map(|(remote, _)| remote)
+                    .collect::<Vec<_>>();
+                let target_remotes = missing_remotes(&all_remote_names, &source_remotes);
                 decisions.push(TagDecision {
                     tag,
                     sha: unique.into_iter().next().unwrap(),
-                    source_remotes: tips.into_iter().map(|(remote, _)| remote).collect(),
+                    source_remotes,
+                    target_remotes,
                 });
             } else {
                 conflicts.push(TagConflict { tag, tips });
@@ -195,12 +234,21 @@ impl GitMirror {
     ) -> Result<()> {
         for remote in remotes {
             for branch in branches {
+                if !branch.target_remotes.contains(&remote.name) {
+                    continue;
+                }
                 let refspec = if force {
                     format!("+{}:refs/heads/{}", branch.sha, branch.branch)
                 } else {
                     format!("{}:refs/heads/{}", branch.sha, branch.branch)
                 };
-                println!("pushing {} to {}", branch.branch, remote.display);
+                println!(
+                    "  {} {} {} {}",
+                    style("push").green().bold(),
+                    style("branch").dim(),
+                    style(&branch.branch).cyan(),
+                    style(format!("-> {}", remote.display)).dim()
+                );
                 self.run(["push", &remote.name, &refspec])?;
             }
         }
@@ -210,8 +258,17 @@ impl GitMirror {
     pub fn push_tags(&self, remotes: &[RemoteSpec], tags: &[TagDecision]) -> Result<()> {
         for remote in remotes {
             for tag in tags {
+                if !tag.target_remotes.contains(&remote.name) {
+                    continue;
+                }
                 let refspec = format!("{}:refs/tags/{}", tag.sha, tag.tag);
-                println!("pushing tag {} to {}", tag.tag, remote.display);
+                println!(
+                    "  {} {} {} {}",
+                    style("push").green().bold(),
+                    style("tag").dim(),
+                    style(&tag.tag).cyan(),
+                    style(format!("-> {}", remote.display)).dim()
+                );
                 self.run(["push", &remote.name, &refspec])?;
             }
         }
@@ -347,13 +404,75 @@ impl GitMirror {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            bail!(
-                "git failed: {}",
+            Err(GitCommandError::new(
+                "git",
+                "",
                 self.redactor
-                    .redact(&String::from_utf8_lossy(&output.stderr))
-            );
+                    .redact(&String::from_utf8_lossy(&output.stderr)),
+            )
+            .into())
         }
     }
+}
+
+#[derive(Debug)]
+pub struct GitCommandError {
+    program: String,
+    stdout: String,
+    stderr: String,
+}
+
+impl GitCommandError {
+    fn new(
+        program: impl Into<String>,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    pub fn stderr(&self) -> &str {
+        &self.stderr
+    }
+}
+
+impl fmt::Display for GitCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} failed\nstdout: {}\nstderr: {}",
+            self.program, self.stdout, self.stderr
+        )
+    }
+}
+
+impl Error for GitCommandError {}
+
+pub fn is_disabled_repository_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<GitCommandError>())
+        .any(|error| is_disabled_repository_stderr(error.stderr()))
+}
+
+fn missing_remotes(all_remote_names: &[String], source_remotes: &[String]) -> Vec<String> {
+    all_remote_names
+        .iter()
+        .filter(|remote| !source_remotes.contains(remote))
+        .cloned()
+        .collect()
+}
+
+fn is_disabled_repository_stderr(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("access to this repository has been disabled")
+        || stderr.contains("repository has been disabled")
+        || stderr.contains("disabled by github staff")
+        || stderr.contains("dmca takedown")
 }
 
 impl Redactor {
@@ -390,7 +509,12 @@ where
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
     if dry_run {
-        println!("dry-run: {} {}", program, redactor.redact(&args.join(" ")));
+        println!(
+            "  {} {} {}",
+            style("dry-run").yellow().bold(),
+            program,
+            style(redactor.redact(&args.join(" "))).dim()
+        );
         return Ok(());
     }
 
@@ -407,7 +531,7 @@ where
     } else {
         let stdout = redactor.redact(&String::from_utf8_lossy(&output.stdout));
         let stderr = redactor.redact(&String::from_utf8_lossy(&output.stderr));
-        bail!("{program} failed\nstdout: {stdout}\nstderr: {stderr}");
+        Err(GitCommandError::new(program, stdout, stderr).into())
     }
 }
 
@@ -449,6 +573,27 @@ mod tests {
     }
 
     #[test]
+    fn detects_provider_disabled_repository_errors() {
+        let error: anyhow::Error = GitCommandError::new(
+            "git",
+            "",
+            "remote: Access to this repository has been disabled by GitHub staff.\nfatal: unable to access 'https://github.com/alice/repo.git/': The requested URL returned error: 403",
+        )
+        .into();
+
+        assert!(is_disabled_repository_error(&error));
+
+        let generic_forbidden: anyhow::Error = GitCommandError::new(
+            "git",
+            "",
+            "fatal: unable to access 'https://github.com/alice/repo.git/': The requested URL returned error: 403",
+        )
+        .into();
+
+        assert!(!is_disabled_repository_error(&generic_forbidden));
+    }
+
+    #[test]
     fn branch_decisions_choose_fast_forward_tip() {
         let fixture = GitFixture::new();
         let base = fixture.commit("base", "base", 1_700_000_000);
@@ -465,7 +610,25 @@ mod tests {
         let main = find_branch(&decisions, "main");
         assert_eq!(main.sha, newer);
         assert_eq!(main.source_remotes, vec!["a".to_string()]);
+        assert_eq!(main.target_remotes, vec!["b".to_string()]);
         assert_ne!(main.sha, base);
+    }
+
+    #[test]
+    fn branch_decisions_do_not_target_remotes_that_already_match() {
+        let fixture = GitFixture::new();
+        fixture.commit("base", "base", 1_700_000_000);
+        fixture.push_head(&fixture.remote_a, "main");
+        fixture.push_head(&fixture.remote_b, "main");
+
+        let mirror = fixture.mirror();
+        fixture.fetch_all(&mirror);
+        let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+
+        assert!(conflicts.is_empty());
+        let main = find_branch(&decisions, "main");
+        assert_eq!(main.source_remotes, vec!["a".to_string(), "b".to_string()]);
+        assert!(main.target_remotes.is_empty());
     }
 
     #[test]
@@ -514,6 +677,7 @@ mod tests {
         assert_eq!(main.sha, newer);
         assert_ne!(main.sha, older);
         assert_eq!(main.source_remotes, vec!["b".to_string()]);
+        assert_eq!(main.target_remotes, vec!["a".to_string()]);
     }
 
     #[test]
@@ -568,7 +732,12 @@ mod tests {
         let (tags, conflicts) = mirror.tag_decisions(&fixture.remotes()).unwrap();
 
         assert_eq!(find_tag(&tags, "v1").sha, base);
+        assert!(find_tag(&tags, "v1").target_remotes.is_empty());
         assert_eq!(find_tag(&tags, "missing-on-b").sha, a_tip);
+        assert_eq!(
+            find_tag(&tags, "missing-on-b").target_remotes,
+            vec!["b".to_string()]
+        );
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].tag, "release");
         assert!(conflicts[0].tips.iter().any(|(_, sha)| sha == &a_tip));
