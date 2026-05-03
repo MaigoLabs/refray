@@ -70,6 +70,14 @@ impl<'a> ProviderClient<'a> {
         self.get(&url).map(|_| ())
     }
 
+    pub fn detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
+        match self.site.provider {
+            ProviderKind::Github => self.github_detect_namespace_kind(namespace),
+            ProviderKind::Gitlab => self.gitlab_detect_namespace_kind(namespace),
+            ProviderKind::Gitea => self.gitea_detect_namespace_kind(namespace),
+        }
+    }
+
     pub fn authenticated_clone_url(&self, clone_url: &str) -> Result<String> {
         let mut url = Url::parse(clone_url)
             .or_else(|_| Url::parse(&format!("{}/{}", self.site.base_url, clone_url)))
@@ -144,6 +152,16 @@ impl<'a> ProviderClient<'a> {
         self.post_json::<GithubRepo>(&url, &body).map(Into::into)
     }
 
+    fn github_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
+        let url = format!("{}/users/{namespace}", self.site.api_base());
+        let value: serde_json::Value = self.get_json(&url)?;
+        Ok(match value.get("type").and_then(|value| value.as_str()) {
+            Some("Organization") => Some(NamespaceKind::Org),
+            Some("User") => Some(NamespaceKind::User),
+            _ => None,
+        })
+    }
+
     fn gitlab_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
@@ -203,6 +221,25 @@ impl<'a> ProviderClient<'a> {
         self.get_json(&url)
     }
 
+    fn gitlab_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
+        let group_url = format!("{}/groups/{}", self.site.api_base(), urlencoding(namespace));
+        if self.get(&group_url).is_ok() {
+            return Ok(Some(NamespaceKind::Group));
+        }
+
+        let username = namespace.rsplit('/').next().unwrap_or(namespace);
+        let user_url = format!(
+            "{}/users?username={}",
+            self.site.api_base(),
+            urlencoding(username)
+        );
+        let users: serde_json::Value = self.get_json(&user_url)?;
+        Ok(users
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+            .then_some(NamespaceKind::User))
+    }
+
     fn gitea_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
@@ -250,6 +287,20 @@ impl<'a> ProviderClient<'a> {
             "auto_init": false,
         });
         self.post_json::<GiteaRepo>(&url, &body).map(Into::into)
+    }
+
+    fn gitea_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
+        let org_url = format!("{}/orgs/{namespace}", self.site.api_base());
+        if self.get(&org_url).is_ok() {
+            return Ok(Some(NamespaceKind::Org));
+        }
+
+        let user_url = format!("{}/users/{namespace}", self.site.api_base());
+        if self.get(&user_url).is_ok() {
+            return Ok(Some(NamespaceKind::User));
+        }
+
+        Ok(None)
     }
 
     fn paged_get<T>(&self, first_url: &str) -> Result<Vec<T>>
@@ -552,6 +603,61 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("401 Unauthorized"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn detect_namespace_kind_uses_authenticated_github_api() {
+        let (api_url, handle) =
+            one_request_server("200 OK", r#"{"type":"Organization"}"#, |request| {
+                assert!(
+                    request.starts_with("GET /users/acme "),
+                    "request was {request}"
+                );
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer secret"),
+                    "request was {request}"
+                );
+            });
+        let site = SiteConfig {
+            api_url: Some(api_url),
+            ..site(ProviderKind::Github, None)
+        };
+
+        let kind = ProviderClient::new(&site)
+            .unwrap()
+            .detect_namespace_kind("acme")
+            .unwrap();
+        assert_eq!(kind, Some(NamespaceKind::Org));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn detect_namespace_kind_uses_authenticated_gitea_api() {
+        let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
+            assert!(
+                request.starts_with("GET /orgs/acme "),
+                "request was {request}"
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: token secret"),
+                "request was {request}"
+            );
+        });
+        let site = SiteConfig {
+            api_url: Some(api_url),
+            ..site(ProviderKind::Gitea, None)
+        };
+
+        let kind = ProviderClient::new(&site)
+            .unwrap()
+            .detect_namespace_kind("acme")
+            .unwrap();
+        assert_eq!(kind, Some(NamespaceKind::Org));
         handle.join().unwrap();
     }
 
