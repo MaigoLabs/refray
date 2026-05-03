@@ -65,6 +65,11 @@ impl<'a> ProviderClient<'a> {
         }
     }
 
+    pub fn validate_token(&self) -> Result<()> {
+        let url = format!("{}/user", self.site.api_base());
+        self.get(&url).map(|_| ())
+    }
+
     pub fn authenticated_clone_url(&self, clone_url: &str) -> Result<String> {
         let mut url = Url::parse(clone_url)
             .or_else(|_| Url::parse(&format!("{}/{}", self.site.base_url, clone_url)))
@@ -449,6 +454,9 @@ pub fn repos_by_name(repos: Vec<EndpointRepo>) -> HashMap<String, Vec<EndpointRe
 mod tests {
     use super::*;
     use crate::config::TokenConfig;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn extracts_next_link() {
@@ -499,6 +507,54 @@ mod tests {
         assert_eq!(urlencoding("parent/child group"), "parent%2Fchild+group");
     }
 
+    #[test]
+    fn validate_token_checks_user_endpoint_with_provider_auth_header() {
+        let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
+            assert!(request.starts_with("GET /user "), "request was {request}");
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer secret"),
+                "request was {request}"
+            );
+        });
+        let site = SiteConfig {
+            api_url: Some(api_url),
+            ..site(ProviderKind::Github, None)
+        };
+
+        ProviderClient::new(&site)
+            .unwrap()
+            .validate_token()
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn validate_token_reports_provider_rejection() {
+        let (api_url, handle) = one_request_server("401 Unauthorized", "bad token", |request| {
+            assert!(request.starts_with("GET /user "), "request was {request}");
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("private-token: secret"),
+                "request was {request}"
+            );
+        });
+        let site = SiteConfig {
+            api_url: Some(api_url),
+            ..site(ProviderKind::Gitlab, None)
+        };
+
+        let err = ProviderClient::new(&site)
+            .unwrap()
+            .validate_token()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("401 Unauthorized"));
+        handle.join().unwrap();
+    }
+
     fn site(provider: ProviderKind, git_username: Option<String>) -> SiteConfig {
         SiteConfig {
             name: "site".to_string(),
@@ -508,5 +564,32 @@ mod tests {
             token: TokenConfig::Value("secret".to_string()),
             git_username,
         }
+    }
+
+    fn one_request_server<F>(
+        status: &'static str,
+        body: &'static str,
+        assert_request: F,
+    ) -> (String, thread::JoinHandle<()>)
+    where
+        F: FnOnce(&str) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let bytes = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert_request(&request);
+
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        (format!("http://{address}"), handle)
     }
 }
