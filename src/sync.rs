@@ -3,9 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use console::style;
 
 use crate::config::{Config, EndpointConfig, MirrorConfig, default_work_dir, validate_config};
-use crate::git::{GitMirror, Redactor, RemoteSpec, safe_remote_name};
+use crate::git::{GitMirror, Redactor, RemoteSpec, is_disabled_repository_error, safe_remote_name};
 use crate::provider::{EndpointRepo, ProviderClient, repos_by_name};
 
 #[derive(Clone, Debug, Default)]
@@ -43,12 +44,76 @@ pub fn sync_all(config: &Config, options: SyncOptions) -> Result<()> {
         .map(|site| site.token())
         .collect::<Result<Vec<_>>>()?;
     let redactor = Redactor::new(tokens);
+    let mut failures = Vec::new();
 
     for mirror in mirrors {
-        sync_group(config, mirror, &options, &work_dir, redactor.clone())?;
+        match sync_group(config, mirror, &options, &work_dir, redactor.clone()) {
+            Ok(mut group_failures) => failures.append(&mut group_failures),
+            Err(error) => {
+                let scope = format!("mirror group {}", mirror.name);
+                print_failure(&scope, &error);
+                failures.push(SyncFailure::new(scope, error));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        print_failure_summary(&failures);
+        bail!("sync completed with {} failure(s)", failures.len());
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct SyncFailure {
+    scope: String,
+    error: String,
+}
+
+impl SyncFailure {
+    fn new(scope: String, error: anyhow::Error) -> Self {
+        Self {
+            scope,
+            error: format_error(&error),
+        }
+    }
+}
+
+fn print_failure(scope: &str, error: &anyhow::Error) {
+    println!(
+        "  {} {} {}",
+        style("fail").red().bold(),
+        style(scope).cyan(),
+        style(error_headline(error)).dim()
+    );
+}
+
+fn print_failure_summary(failures: &[SyncFailure]) {
+    println!();
+    println!(
+        "{} {}",
+        style("Failures").red().bold(),
+        style(format!("({})", failures.len())).dim()
+    );
+    for (index, failure) in failures.iter().enumerate() {
+        println!("  {}. {}", index + 1, style(&failure.scope).cyan().bold());
+        for line in failure.error.lines() {
+            println!("     {line}");
+        }
+    }
+}
+
+fn error_headline(error: &anyhow::Error) -> String {
+    format_error(error)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("unknown error")
+        .to_string()
+}
+
+fn format_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
 }
 
 fn sync_group(
@@ -57,8 +122,13 @@ fn sync_group(
     options: &SyncOptions,
     work_dir: &Path,
     redactor: Redactor,
-) -> Result<()> {
-    println!("syncing mirror group {}", mirror.name);
+) -> Result<Vec<SyncFailure>> {
+    println!();
+    println!(
+        "{} {}",
+        style("Mirror group").cyan().bold(),
+        style(&mirror.name).bold()
+    );
     let create_missing = options
         .create_missing_override
         .unwrap_or(mirror.create_missing);
@@ -68,7 +138,11 @@ fn sync_group(
     for endpoint in &mirror.endpoints {
         let site = config.site(&endpoint.site).unwrap();
         let client = ProviderClient::new(site)?;
-        println!("listing {}", endpoint.label());
+        println!(
+            "  {} {}",
+            style("list").cyan().bold(),
+            style(endpoint.label()).dim()
+        );
         let repos = client
             .list_repos(endpoint)
             .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
@@ -83,27 +157,16 @@ fn sync_group(
     let mut repos = repos_by_name(all_endpoint_repos);
     let repo_names = repos.keys().cloned().collect::<BTreeSet<_>>();
     if repo_names.is_empty() {
-        println!("mirror group {} has no repositories", mirror.name);
-        return Ok(());
+        println!(
+            "  {} mirror group has no repositories",
+            style("skip").yellow().bold()
+        );
+        return Ok(Vec::new());
     }
 
+    let mut failures = Vec::new();
     for repo_name in repo_names {
         let mut existing = repos.remove(&repo_name).unwrap_or_default();
-        ensure_missing_repos(
-            config,
-            mirror,
-            &repo_name,
-            &mut existing,
-            create_missing,
-            options.dry_run,
-        )?;
-        if existing.len() < 2 {
-            println!(
-                "skipping {}: fewer than two endpoints have this repository",
-                repo_name
-            );
-            continue;
-        }
         let context = RepoSyncContext {
             config,
             mirror,
@@ -112,10 +175,16 @@ fn sync_group(
             dry_run: options.dry_run,
             allow_force,
         };
-        sync_repo(&context, &repo_name, &existing)?;
+        if let Err(error) = sync_repo(&context, &repo_name, &mut existing, create_missing)
+            .with_context(|| format!("failed to sync repo {repo_name}"))
+        {
+            let scope = format!("{}/{}", mirror.name, repo_name);
+            print_failure(&scope, &error);
+            failures.push(SyncFailure::new(scope, error));
+        }
     }
 
-    Ok(())
+    Ok(failures)
 }
 
 fn ensure_missing_repos(
@@ -138,14 +207,21 @@ fn ensure_missing_repos(
         }
         if !create_missing {
             println!(
-                "{} is missing on {}; creation disabled",
-                repo_name,
-                endpoint.label()
+                "  {} {} missing on {} ({})",
+                style("skip").yellow().bold(),
+                style(repo_name).cyan(),
+                style(endpoint.label()).dim(),
+                style("creation disabled").dim()
             );
             continue;
         }
 
-        println!("creating {} on {}", repo_name, endpoint.label());
+        println!(
+            "  {} {} {}",
+            style("create").green().bold(),
+            style(repo_name).cyan(),
+            style(format!("on {}", endpoint.label())).dim()
+        );
         if dry_run {
             continue;
         }
@@ -164,9 +240,10 @@ fn ensure_missing_repos(
             .with_context(|| format!("failed to create {} on {}", repo_name, endpoint.label()))?;
         if created.private != matches!(mirror.visibility, crate::config::Visibility::Private) {
             println!(
-                "created {} on {}, but provider reported a different visibility than requested",
-                repo_name,
-                endpoint.label()
+                "  {} created {} on {}, but provider reported a different visibility than requested",
+                style("warn").yellow().bold(),
+                style(repo_name).cyan(),
+                style(endpoint.label()).dim()
             );
         }
         existing.push(EndpointRepo {
@@ -187,8 +264,97 @@ struct RepoSyncContext<'a> {
     allow_force: bool,
 }
 
-fn sync_repo(context: &RepoSyncContext<'_>, repo_name: &str, repos: &[EndpointRepo]) -> Result<()> {
-    println!("syncing repo {}", repo_name);
+fn sync_repo(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    repos: &mut Vec<EndpointRepo>,
+    create_missing: bool,
+) -> Result<()> {
+    println!();
+    println!(
+        "{} {}",
+        style("Repo").magenta().bold(),
+        style(repo_name).bold()
+    );
+    if repos.is_empty() {
+        println!(
+            "  {} {}",
+            style("skip").yellow().bold(),
+            style("repository not found on any endpoint").dim()
+        );
+        return Ok(());
+    }
+
+    let path = context
+        .work_dir
+        .join(safe_remote_name(&context.mirror.name))
+        .join(format!("{}.git", safe_remote_name(repo_name)));
+    let mirror_repo = GitMirror::open(path, context.redactor.clone(), context.dry_run)?;
+
+    let initial_remotes = remote_specs(context, repos)?;
+    mirror_repo.configure_remotes(&initial_remotes)?;
+    for remote in &initial_remotes {
+        if let Err(error) = mirror_repo.fetch_remote(remote) {
+            if is_disabled_repository_error(&error) {
+                println!(
+                    "  {} {} {}",
+                    style("skip").yellow().bold(),
+                    style(repo_name).cyan(),
+                    style(format!("provider blocked access on {}", remote.display)).dim()
+                );
+                return Ok(());
+            }
+            return Err(error).with_context(|| format!("failed to fetch {}", remote.display));
+        }
+    }
+
+    ensure_missing_repos(
+        context.config,
+        context.mirror,
+        repo_name,
+        repos,
+        create_missing,
+        context.dry_run,
+    )?;
+
+    if repos.len() < 2 {
+        println!(
+            "  {} {} {}",
+            style("skip").yellow().bold(),
+            style(repo_name).cyan(),
+            style("fewer than two endpoints have this repository").dim()
+        );
+        return Ok(());
+    }
+
+    let remotes = remote_specs(context, repos)?;
+    mirror_repo.configure_remotes(&remotes)?;
+    let initial_remote_names = initial_remotes
+        .iter()
+        .map(|remote| remote.name.clone())
+        .collect::<BTreeSet<_>>();
+    for remote in remotes
+        .iter()
+        .filter(|remote| !initial_remote_names.contains(&remote.name))
+    {
+        if let Err(error) = mirror_repo.fetch_remote(remote) {
+            if is_disabled_repository_error(&error) {
+                println!(
+                    "  {} {} {}",
+                    style("skip").yellow().bold(),
+                    style(repo_name).cyan(),
+                    style(format!("provider blocked access on {}", remote.display)).dim()
+                );
+                return Ok(());
+            }
+            return Err(error).with_context(|| format!("failed to fetch {}", remote.display));
+        }
+    }
+
+    push_repo_refs(context, &mirror_repo, &remotes)
+}
+
+fn remote_specs(context: &RepoSyncContext<'_>, repos: &[EndpointRepo]) -> Result<Vec<RemoteSpec>> {
     let endpoint_map = context
         .mirror
         .endpoints
@@ -214,17 +380,19 @@ fn sync_repo(context: &RepoSyncContext<'_>, repo_name: &str, repos: &[EndpointRe
         });
     }
 
-    let path = context
-        .work_dir
-        .join(safe_remote_name(&context.mirror.name))
-        .join(format!("{}.git", safe_remote_name(repo_name)));
-    let mirror_repo = GitMirror::open(path, context.redactor.clone(), context.dry_run)?;
-    mirror_repo.configure_remotes(&remotes)?;
-    for remote in &remotes {
-        mirror_repo.fetch_remote(remote)?;
-    }
+    Ok(remotes)
+}
 
-    let (branches, conflicts) = mirror_repo.branch_decisions(&remotes, context.allow_force)?;
+fn push_repo_refs(
+    context: &RepoSyncContext<'_>,
+    mirror_repo: &GitMirror,
+    remotes: &[RemoteSpec],
+) -> Result<()> {
+    let (branches, conflicts) = mirror_repo.branch_decisions(remotes, context.allow_force)?;
+    let branches_to_push = branches
+        .into_iter()
+        .filter(|branch| !branch.target_remotes.is_empty())
+        .collect::<Vec<_>>();
     for conflict in conflicts {
         let details = conflict
             .tips
@@ -233,12 +401,19 @@ fn sync_repo(context: &RepoSyncContext<'_>, repo_name: &str, repos: &[EndpointRe
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "conflict in {}/{}: branch {} diverged across {}. Skipping that branch.",
-            context.mirror.name, repo_name, conflict.branch, details
+            "  {} branch {} diverged across {} ({})",
+            style("conflict").yellow().bold(),
+            style(conflict.branch).cyan(),
+            details,
+            style("skipped").dim()
         );
     }
 
-    let (tags, tag_conflicts) = mirror_repo.tag_decisions(&remotes)?;
+    let (tags, tag_conflicts) = mirror_repo.tag_decisions(remotes)?;
+    let tags_to_push = tags
+        .into_iter()
+        .filter(|tag| !tag.target_remotes.is_empty())
+        .collect::<Vec<_>>();
     for conflict in tag_conflicts {
         let details = conflict
             .tips
@@ -247,48 +422,72 @@ fn sync_repo(context: &RepoSyncContext<'_>, repo_name: &str, repos: &[EndpointRe
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "conflict in {}/{}: tag {} differs across {}. Skipping that tag.",
-            context.mirror.name, repo_name, conflict.tag, details
+            "  {} tag {} differs across {} ({})",
+            style("conflict").yellow().bold(),
+            style(conflict.tag).cyan(),
+            details,
+            style("skipped").dim()
         );
     }
 
-    if branches.is_empty() && tags.is_empty() {
-        println!("{} has no branches or tags to push", repo_name);
+    if branches_to_push.is_empty() && tags_to_push.is_empty() {
+        println!(
+            "  {} branches and tags already match all endpoints",
+            style("up-to-date").green().bold()
+        );
         return Ok(());
     }
-    if !branches.is_empty() {
-        let branch_summary = branches
-            .iter()
-            .map(|branch| {
-                format!(
-                    "{}@{} from {}",
-                    branch.branch,
-                    short_sha(&branch.sha),
-                    branch.source_remotes.join("+")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("resolved branches for {}: {}", repo_name, branch_summary);
-        mirror_repo.push_branches(&remotes, &branches, context.allow_force)?;
+    if !branches_to_push.is_empty() {
+        print_branch_decisions(&branches_to_push);
+        mirror_repo.push_branches(remotes, &branches_to_push, context.allow_force)?;
     }
-    if !tags.is_empty() {
-        let tag_summary = tags
-            .iter()
-            .map(|tag| {
-                format!(
-                    "{}@{} from {}",
-                    tag.tag,
-                    short_sha(&tag.sha),
-                    tag.source_remotes.join("+")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("resolved tags for {}: {}", repo_name, tag_summary);
-        mirror_repo.push_tags(&remotes, &tags)?;
+    if !tags_to_push.is_empty() {
+        print_tag_decisions(&tags_to_push);
+        mirror_repo.push_tags(remotes, &tags_to_push)?;
     }
     Ok(())
+}
+
+fn print_branch_decisions(branches: &[crate::git::BranchDecision]) {
+    println!(
+        "  {} {}",
+        style("branches").cyan().bold(),
+        style(format!("({})", branches.len())).dim()
+    );
+    for branch in branches {
+        println!(
+            "    {} {} {}",
+            style(&branch.branch).cyan(),
+            style(format!("@{}", short_sha(&branch.sha))).dim(),
+            style(format!(
+                "{} -> {}",
+                branch.source_remotes.join("+"),
+                branch.target_remotes.join("+")
+            ))
+            .dim()
+        );
+    }
+}
+
+fn print_tag_decisions(tags: &[crate::git::TagDecision]) {
+    println!(
+        "  {} {}",
+        style("tags").cyan().bold(),
+        style(format!("({})", tags.len())).dim()
+    );
+    for tag in tags {
+        println!(
+            "    {} {} {}",
+            style(&tag.tag).cyan(),
+            style(format!("@{}", short_sha(&tag.sha))).dim(),
+            style(format!(
+                "{} -> {}",
+                tag.source_remotes.join("+"),
+                tag.target_remotes.join("+")
+            ))
+            .dim()
+        );
+    }
 }
 
 fn short_sha(sha: &str) -> &str {

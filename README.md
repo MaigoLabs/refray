@@ -32,7 +32,22 @@ Or use the interactive wizard, which can create or update the same config file:
 git-sync config wizard
 ```
 
-The wizard asks for the provider first, suggests a site name from that provider, stores the PAT directly in the config file, and validates the PAT against the provider before saving the site.
+The wizard asks for profile or organization URLs, reuses existing credentials when it can, asks for a PAT only when needed, and then shows the sync group before asking whether to add another group.
+
+Example wizard flow:
+
+1. Enter `https://github.com/alice`.
+2. Paste a PAT if no existing GitHub credential can access that namespace.
+3. Enter `https://git.wonder.land/alice`.
+4. Pick the provider if the instance cannot be detected.
+5. Paste a PAT if needed.
+6. Optionally add a third endpoint for 3-way sync.
+
+PAT quick setup:
+
+- GitHub: open `https://github.com/settings/tokens`, create a classic PAT with `repo` permissions, then copy the token.
+- GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=git-sync&scopes=api`, create the token, then copy it.
+- Gitea: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 
 Add sites. Prefer `--token-env` so PATs do not live in shell history or the config file.
 
