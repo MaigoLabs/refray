@@ -126,6 +126,14 @@ Retry only repositories that failed during the previous non-dry-run sync:
 git-sync sync --retry-failed
 ```
 
+Control repo-level parallelism:
+
+```sh
+git-sync sync --jobs 8
+```
+
+Repository logs are prefixed while jobs run concurrently, so interleaved output remains attributable. The default is 4 workers; use `--jobs 1` for serial sync.
+
 `git-sync` stores a small ref cache in the work directory. On later runs it first checks each repository with `git ls-remote --heads --tags`; when all endpoints report the same refs as the last successful sync, it skips the full fetch/push pass for that repository.
 
 Use cron or another scheduler for automatic execution:

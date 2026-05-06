@@ -1,6 +1,7 @@
 mod config;
 mod git;
 mod interactive;
+mod logging;
 mod provider;
 mod sync;
 
@@ -13,7 +14,7 @@ use crate::config::{
     Config, EndpointConfig, NamespaceKind, ProviderKind, SiteConfig, TokenConfig, Visibility,
     default_config_path,
 };
-use crate::sync::{SyncOptions, sync_all};
+use crate::sync::{DEFAULT_JOBS, SyncOptions, sync_all};
 
 #[derive(Parser, Debug)]
 #[command(name = "git-sync")]
@@ -111,6 +112,8 @@ struct SyncCommand {
     retry_failed: bool,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
+    jobs: usize,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -154,6 +157,7 @@ fn main() -> Result<()> {
                     repo_pattern: command.repo_pattern,
                     retry_failed: command.retry_failed,
                     work_dir: command.work_dir,
+                    jobs: command.jobs,
                 },
             )
         }
@@ -381,6 +385,16 @@ mod tests {
             panic!("parsed unexpected command");
         };
         assert!(args.retry_failed);
+    }
+
+    #[test]
+    fn cli_accepts_sync_jobs() {
+        let cli = Cli::try_parse_from(["git-sync", "sync", "--jobs", "8"]).unwrap();
+
+        let Command::Sync(args) = cli.command else {
+            panic!("parsed unexpected command");
+        };
+        assert_eq!(args.jobs, 8);
     }
 
     #[test]
