@@ -15,6 +15,12 @@ pub struct RemoteSpec {
     pub display: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteRefSnapshot {
+    pub hash: String,
+    pub refs: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct BranchDecision {
     pub branch: String,
@@ -415,6 +421,44 @@ impl GitMirror {
     }
 }
 
+pub fn ls_remote_refs(remote: &RemoteSpec, redactor: &Redactor) -> Result<RemoteRefSnapshot> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--heads", "--tags", "--refs", &remote.url])
+        .output()
+        .with_context(|| "failed to run git ls-remote")?;
+    if !output.status.success() {
+        let stdout = redactor.redact(&String::from_utf8_lossy(&output.stdout));
+        let stderr = redactor.redact(&String::from_utf8_lossy(&output.stderr));
+        return Err(GitCommandError::new("git ls-remote", stdout, stderr).into());
+    }
+
+    let mut refs = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+
+    Ok(RemoteRefSnapshot {
+        hash: stable_ref_hash(&refs),
+        refs: refs.len(),
+    })
+}
+
+fn stable_ref_hash(refs: &[String]) -> String {
+    // FNV-1a is enough here: this is a deterministic change detector, not a
+    // security boundary.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for line in refs {
+        for byte in line.bytes().chain(std::iter::once(b'\n')) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 #[derive(Debug)]
 pub struct GitCommandError {
     program: String,
@@ -591,6 +635,29 @@ mod tests {
         .into();
 
         assert!(!is_disabled_repository_error(&generic_forbidden));
+    }
+
+    #[test]
+    fn ls_remote_snapshot_changes_when_remote_refs_change() {
+        let fixture = GitFixture::new();
+        fixture.commit("base", "base", 1_700_000_000);
+        fixture.tag("v1");
+        fixture.push_head(&fixture.remote_a, "main");
+        fixture.push_tag(&fixture.remote_a, "v1");
+        let remote = fixture.remotes().remove(0);
+        let redactor = Redactor::new(Vec::new());
+
+        let first = ls_remote_refs(&remote, &redactor).unwrap();
+        let unchanged = ls_remote_refs(&remote, &redactor).unwrap();
+        assert_eq!(first, unchanged);
+        assert_eq!(first.refs, 2);
+
+        fixture.commit("feature", "feature", 1_700_000_100);
+        fixture.push_head(&fixture.remote_a, "feature");
+        let changed = ls_remote_refs(&remote, &redactor).unwrap();
+
+        assert_ne!(first.hash, changed.hash);
+        assert_eq!(changed.refs, 3);
     }
 
     #[test]
