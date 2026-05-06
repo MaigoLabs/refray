@@ -105,6 +105,10 @@ struct SyncCommand {
     no_create: bool,
     #[arg(long)]
     force: bool,
+    #[arg(long, value_name = "REGEX")]
+    repo_pattern: Option<String>,
+    #[arg(long)]
+    retry_failed: bool,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
 }
@@ -147,6 +151,8 @@ fn main() -> Result<()> {
                     dry_run: command.dry_run,
                     create_missing_override: command.no_create.then_some(false),
                     force_override: command.force.then_some(true),
+                    repo_pattern: command.repo_pattern,
+                    retry_failed: command.retry_failed,
                     work_dir: command.work_dir,
                 },
             )
@@ -347,6 +353,34 @@ mod tests {
             cli.command,
             Command::Config(ConfigCommand::Wizard)
         ));
+    }
+
+    #[test]
+    fn cli_accepts_sync_repo_pattern() {
+        let cli = Cli::try_parse_from([
+            "git-sync",
+            "sync",
+            "--repo-pattern",
+            "^(foo|bar)-",
+            "--dry-run",
+        ])
+        .unwrap();
+
+        let Command::Sync(args) = cli.command else {
+            panic!("parsed unexpected command");
+        };
+        assert_eq!(args.repo_pattern, Some("^(foo|bar)-".to_string()));
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn cli_accepts_sync_retry_failed() {
+        let cli = Cli::try_parse_from(["git-sync", "sync", "--retry-failed"]).unwrap();
+
+        let Command::Sync(args) = cli.command else {
+            panic!("parsed unexpected command");
+        };
+        assert!(args.retry_failed);
     }
 
     #[test]

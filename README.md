@@ -114,6 +114,18 @@ Preview commands without writing to Git remotes:
 git-sync sync --dry-run
 ```
 
+Sync only repositories whose names match a regex:
+
+```sh
+git-sync sync --repo-pattern '^(foo|bar)-'
+```
+
+Retry only repositories that failed during the previous non-dry-run sync:
+
+```sh
+git-sync sync --retry-failed
+```
+
 Use cron or another scheduler for automatic execution:
 
 ```cron
