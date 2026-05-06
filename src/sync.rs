@@ -1,13 +1,17 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use console::style;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, EndpointConfig, MirrorConfig, default_work_dir, validate_config};
 use crate::git::{GitMirror, Redactor, RemoteSpec, is_disabled_repository_error, safe_remote_name};
 use crate::provider::{EndpointRepo, ProviderClient, repos_by_name};
+
+const FAILURE_STATE_FILE: &str = "failed-repos.toml";
 
 #[derive(Clone, Debug, Default)]
 pub struct SyncOptions {
@@ -15,6 +19,8 @@ pub struct SyncOptions {
     pub dry_run: bool,
     pub create_missing_override: Option<bool>,
     pub force_override: Option<bool>,
+    pub repo_pattern: Option<String>,
+    pub retry_failed: bool,
     pub work_dir: Option<PathBuf>,
 }
 
@@ -44,17 +50,40 @@ pub fn sync_all(config: &Config, options: SyncOptions) -> Result<()> {
         .map(|site| site.token())
         .collect::<Result<Vec<_>>>()?;
     let redactor = Redactor::new(tokens);
+    let repo_pattern = options
+        .repo_pattern
+        .as_deref()
+        .map(Regex::new)
+        .transpose()
+        .with_context(|| "invalid --repo-pattern regex")?;
+    let retry_failed_repos = if options.retry_failed {
+        Some(load_failure_state(&work_dir)?.repos_by_group())
+    } else {
+        None
+    };
     let mut failures = Vec::new();
 
     for mirror in mirrors {
-        match sync_group(config, mirror, &options, &work_dir, redactor.clone()) {
+        match sync_group(
+            config,
+            mirror,
+            &options,
+            &work_dir,
+            redactor.clone(),
+            repo_pattern.as_ref(),
+            retry_failed_repos.as_ref(),
+        ) {
             Ok(mut group_failures) => failures.append(&mut group_failures),
             Err(error) => {
                 let scope = format!("mirror group {}", mirror.name);
                 print_failure(&scope, &error);
-                failures.push(SyncFailure::new(scope, error));
+                failures.push(SyncFailure::group(scope, error));
             }
         }
+    }
+
+    if !options.dry_run {
+        save_failure_state(&work_dir, &FailureState::from_failures(&failures))?;
     }
 
     if !failures.is_empty() {
@@ -69,15 +98,91 @@ pub fn sync_all(config: &Config, options: SyncOptions) -> Result<()> {
 struct SyncFailure {
     scope: String,
     error: String,
+    retry: Option<FailedRepo>,
 }
 
 impl SyncFailure {
-    fn new(scope: String, error: anyhow::Error) -> Self {
+    fn group(scope: String, error: anyhow::Error) -> Self {
         Self {
             scope,
             error: format_error(&error),
+            retry: None,
         }
     }
+
+    fn repo(group: String, repo: String, error: anyhow::Error) -> Self {
+        Self {
+            scope: format!("{group}/{repo}"),
+            error: format_error(&error),
+            retry: Some(FailedRepo { group, repo }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct FailedRepo {
+    group: String,
+    repo: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct FailureState {
+    #[serde(default)]
+    repos: Vec<FailedRepo>,
+}
+
+impl FailureState {
+    fn from_failures(failures: &[SyncFailure]) -> Self {
+        let repos = failures
+            .iter()
+            .filter_map(|failure| failure.retry.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self { repos }
+    }
+
+    fn repos_by_group(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut output = BTreeMap::<String, BTreeSet<String>>::new();
+        for failure in &self.repos {
+            output
+                .entry(failure.group.clone())
+                .or_default()
+                .insert(failure.repo.clone());
+        }
+        output
+    }
+}
+
+fn load_failure_state(work_dir: &Path) -> Result<FailureState> {
+    let path = failure_state_path(work_dir);
+    if !path.exists() {
+        return Ok(FailureState::default());
+    }
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn save_failure_state(work_dir: &Path, state: &FailureState) -> Result<()> {
+    let path = failure_state_path(work_dir);
+    if state.repos.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let contents = toml::to_string_pretty(state)?;
+    fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn failure_state_path(work_dir: &Path) -> PathBuf {
+    work_dir.join(FAILURE_STATE_FILE)
 }
 
 fn print_failure(scope: &str, error: &anyhow::Error) {
@@ -122,6 +227,8 @@ fn sync_group(
     options: &SyncOptions,
     work_dir: &Path,
     redactor: Redactor,
+    repo_pattern: Option<&Regex>,
+    retry_failed_repos: Option<&BTreeMap<String, BTreeSet<String>>>,
 ) -> Result<Vec<SyncFailure>> {
     println!();
     println!(
@@ -155,13 +262,59 @@ fn sync_group(
     }
 
     let mut repos = repos_by_name(all_endpoint_repos);
-    let repo_names = repos.keys().cloned().collect::<BTreeSet<_>>();
+    let all_repo_count = repos.len();
+    let retry_repo_names = retry_failed_repos.and_then(|repos| repos.get(&mirror.name));
+    let repo_names = repos
+        .keys()
+        .filter(|name| {
+            repo_pattern.is_none_or(|pattern| pattern.is_match(name))
+                && retry_repo_names.is_none_or(|repos| repos.contains(name.as_str()))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if repo_names.is_empty() {
-        println!(
-            "  {} mirror group has no repositories",
-            style("skip").yellow().bold()
-        );
+        if let Some(retry_repo_names) = retry_repo_names {
+            println!(
+                "  {} no previously failed repositories were found in this group ({} saved)",
+                style("skip").yellow().bold(),
+                retry_repo_names.len()
+            );
+        } else if retry_failed_repos.is_some() {
+            println!(
+                "  {} no previous failures for this group",
+                style("skip").yellow().bold()
+            );
+        } else if let Some(pattern) = repo_pattern {
+            println!(
+                "  {} no repositories match {} ({} discovered)",
+                style("skip").yellow().bold(),
+                style(pattern.as_str()).cyan(),
+                all_repo_count
+            );
+        } else {
+            println!(
+                "  {} mirror group has no repositories",
+                style("skip").yellow().bold()
+            );
+        }
         return Ok(Vec::new());
+    }
+    if let Some(pattern) = repo_pattern {
+        println!(
+            "  {} {} of {} repositories match {}",
+            style("filter").cyan().bold(),
+            repo_names.len(),
+            all_repo_count,
+            style(pattern.as_str()).cyan()
+        );
+    }
+    if let Some(retry_repo_names) = retry_repo_names {
+        println!(
+            "  {} retrying {} of {} previously failed repositories",
+            style("retry").cyan().bold(),
+            repo_names.len(),
+            retry_repo_names.len()
+        );
     }
 
     let mut failures = Vec::new();
@@ -180,7 +333,7 @@ fn sync_group(
         {
             let scope = format!("{}/{}", mirror.name, repo_name);
             print_failure(&scope, &error);
-            failures.push(SyncFailure::new(scope, error));
+            failures.push(SyncFailure::repo(mirror.name.clone(), repo_name, error));
         }
     }
 
@@ -492,4 +645,63 @@ fn print_tag_decisions(tags: &[crate::git::TagDecision]) {
 
 fn short_sha(sha: &str) -> &str {
     sha.get(..12).unwrap_or(sha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_state_persists_repo_failures_by_group() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let failures = vec![
+            SyncFailure::repo(
+                "sync-1".to_string(),
+                "repo-a".to_string(),
+                anyhow::anyhow!("a"),
+            ),
+            SyncFailure::repo(
+                "sync-1".to_string(),
+                "repo-a".to_string(),
+                anyhow::anyhow!("a again"),
+            ),
+            SyncFailure::repo(
+                "sync-2".to_string(),
+                "repo-b".to_string(),
+                anyhow::anyhow!("b"),
+            ),
+            SyncFailure::group(
+                "mirror group sync-3".to_string(),
+                anyhow::anyhow!("list failed"),
+            ),
+        ];
+        let state = FailureState::from_failures(&failures);
+
+        save_failure_state(temp.path(), &state).unwrap();
+        let loaded = load_failure_state(temp.path()).unwrap();
+        let by_group = loaded.repos_by_group();
+
+        assert_eq!(by_group["sync-1"].len(), 1);
+        assert!(by_group["sync-1"].contains("repo-a"));
+        assert_eq!(by_group["sync-2"].len(), 1);
+        assert!(by_group["sync-2"].contains("repo-b"));
+        assert!(!by_group.contains_key("sync-3"));
+    }
+
+    #[test]
+    fn empty_failure_state_removes_retry_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = FailureState {
+            repos: vec![FailedRepo {
+                group: "sync-1".to_string(),
+                repo: "repo-a".to_string(),
+            }],
+        };
+        save_failure_state(temp.path(), &state).unwrap();
+        assert!(failure_state_path(temp.path()).exists());
+
+        save_failure_state(temp.path(), &FailureState::default()).unwrap();
+
+        assert!(!failure_state_path(temp.path()).exists());
+    }
 }
