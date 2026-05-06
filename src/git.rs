@@ -64,7 +64,7 @@ impl GitMirror {
     pub fn open(path: PathBuf, redactor: Redactor, dry_run: bool) -> Result<Self> {
         if !path.exists() {
             if dry_run {
-                println!(
+                crate::logln!(
                     "  {} git init --bare {}",
                     style("dry-run").yellow().bold(),
                     style(path.display()).dim()
@@ -100,7 +100,7 @@ impl GitMirror {
     pub fn fetch_remote(&self, remote: &RemoteSpec) -> Result<()> {
         let branch_refspec = format!("+refs/heads/*:refs/remotes/{}/*", remote.name);
         let tag_refspec = format!("+refs/tags/*:refs/remote-tags/{}/*", remote.name);
-        println!(
+        crate::logln!(
             "  {} {}",
             style("fetch").cyan().bold(),
             style(&remote.display).dim()
@@ -248,7 +248,7 @@ impl GitMirror {
                 } else {
                     format!("{}:refs/heads/{}", branch.sha, branch.branch)
                 };
-                println!(
+                crate::logln!(
                     "  {} {} {} {}",
                     style("push").green().bold(),
                     style("branch").dim(),
@@ -268,7 +268,7 @@ impl GitMirror {
                     continue;
                 }
                 let refspec = format!("{}:refs/tags/{}", tag.sha, tag.tag);
-                println!(
+                crate::logln!(
                     "  {} {} {} {}",
                     style("push").green().bold(),
                     style("tag").dim(),
@@ -553,7 +553,7 @@ where
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
     if dry_run {
-        println!(
+        crate::logln!(
             "  {} {} {}",
             style("dry-run").yellow().bold(),
             program,
