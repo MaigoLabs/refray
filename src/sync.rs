@@ -443,8 +443,10 @@ fn sync_group(
     let base_ref_state = context.ref_state.clone();
     let queue = Arc::new(Mutex::new(repo_jobs));
     let (sender, receiver) = mpsc::channel();
+    let use_status_area = worker_count > 1;
+    let _status_guard = use_status_area.then(|| logging::start_status_area(worker_count));
     let failures = thread::scope(|scope| {
-        for _ in 0..worker_count {
+        for worker_id in 0..worker_count {
             let queue = Arc::clone(&queue);
             let sender = sender.clone();
             let redactor = context.redactor.clone();
@@ -455,8 +457,9 @@ fn sync_group(
 
             scope.spawn(move || {
                 while let Some(mut job) = pop_repo_job(&queue) {
-                    let prefix = logging::repo_prefix(&job.repo_name, repo_log_width);
-                    let _prefix_guard = logging::set_prefix(prefix);
+                    let _repo_log_guard = use_status_area.then(|| {
+                        logging::start_repo_log(job.repo_name.clone(), worker_id, repo_log_width)
+                    });
                     let repo_context = RepoSyncContext {
                         config,
                         mirror,
@@ -481,6 +484,7 @@ fn sync_group(
                         repo_name: job.repo_name,
                         error,
                     });
+                    logging::finish_repo_log();
                     if sender.send(result).is_err() {
                         break;
                     }
