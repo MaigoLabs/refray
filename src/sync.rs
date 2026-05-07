@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, EndpointConfig, MirrorConfig, default_work_dir, validate_config};
 use crate::git::{
-    GitMirror, Redactor, RemoteRefSnapshot, RemoteSpec, is_disabled_repository_error,
-    ls_remote_refs, safe_remote_name,
+    BranchDeletion, GitMirror, Redactor, RemoteRefSnapshot, RemoteSpec,
+    is_disabled_repository_error, ls_remote_refs, safe_remote_name,
 };
 use crate::logging;
 use crate::provider::{EndpointRepo, ProviderClient, repos_by_name};
@@ -219,6 +219,10 @@ fn failure_state_path(work_dir: &Path) -> PathBuf {
 struct RemoteRefState {
     hash: String,
     refs: usize,
+    #[serde(default)]
+    branches: BTreeMap<String, String>,
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
 }
 
 impl From<RemoteRefSnapshot> for RemoteRefState {
@@ -226,6 +230,8 @@ impl From<RemoteRefSnapshot> for RemoteRefState {
         Self {
             hash: value.hash,
             refs: value.refs,
+            branches: value.branches,
+            tags: value.tags,
         }
     }
 }
@@ -235,6 +241,8 @@ impl From<&RemoteRefState> for RemoteRefSnapshot {
         Self {
             hash: value.hash.clone(),
             refs: value.refs,
+            branches: value.branches.clone(),
+            tags: value.tags.clone(),
         }
     }
 }
@@ -260,6 +268,10 @@ impl RefState {
             .entry(group.to_string())
             .or_default()
             .insert(repo.to_string(), refs);
+    }
+
+    fn repo(&self, group: &str, repo: &str) -> Option<&BTreeMap<String, RemoteRefState>> {
+        self.repos.get(group).and_then(|repos| repos.get(repo))
     }
 }
 
@@ -687,6 +699,7 @@ fn sync_repo(
     let mirror_repo = GitMirror::open(path, context.redactor.clone(), context.dry_run)?;
 
     mirror_repo.configure_remotes(&initial_remotes)?;
+    let cached_ref_state = cached_ref_state(&mirror_repo, &initial_remotes)?;
     if !context.dry_run
         && all_endpoints_present
         && cached_refs_match(&mirror_repo, &initial_remotes, &initial_ref_state)?
@@ -758,7 +771,14 @@ fn sync_repo(
         }
     }
 
-    let result = push_repo_refs(context, &mirror_repo, &remotes)?;
+    let result = push_repo_refs(
+        context,
+        &mirror_repo,
+        &remotes,
+        detailed_repo_ref_state(ref_state.repo(&context.mirror.name, repo_name))
+            .or(cached_ref_state.as_ref()),
+        &initial_ref_state,
+    )?;
     if !context.dry_run && !result.had_conflicts {
         let refs = if result.pushed {
             let Some(refs) = check_remote_refs(context, repo_name, &remotes)? else {
@@ -800,6 +820,29 @@ fn cached_refs_match(
         }
     }
     Ok(true)
+}
+
+fn cached_ref_state(
+    mirror_repo: &GitMirror,
+    remotes: &[RemoteSpec],
+) -> Result<Option<BTreeMap<String, RemoteRefState>>> {
+    let mut refs = BTreeMap::new();
+    for remote in remotes {
+        let Some(snapshot) = mirror_repo.cached_remote_ref_snapshot(remote)? else {
+            return Ok(None);
+        };
+        refs.insert(remote.name.clone(), snapshot.into());
+    }
+    Ok(Some(refs))
+}
+
+fn detailed_repo_ref_state(
+    refs: Option<&BTreeMap<String, RemoteRefState>>,
+) -> Option<&BTreeMap<String, RemoteRefState>> {
+    refs.filter(|refs| {
+        refs.values()
+            .any(|remote| !remote.branches.is_empty() || !remote.tags.is_empty())
+    })
 }
 
 fn check_remote_refs(
@@ -868,14 +911,35 @@ fn push_repo_refs(
     context: &RepoSyncContext<'_>,
     mirror_repo: &GitMirror,
     remotes: &[RemoteSpec],
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
 ) -> Result<RepoRefSyncResult> {
+    let (branch_deletions, deletion_conflicts, blocked_branches) =
+        branch_deletion_decisions(remotes, previous_refs, current_refs);
+    let had_deletion_conflicts = !deletion_conflicts.is_empty();
+    for conflict in deletion_conflicts {
+        crate::logln!(
+            "  {} branch {} was deleted on {} but changed on {} ({})",
+            style("conflict").yellow().bold(),
+            style(conflict.branch).cyan(),
+            conflict.deleted_remotes.join("+"),
+            conflict.changed_remotes.join("+"),
+            style("skipped").dim()
+        );
+    }
+
     let (branches, conflicts) = mirror_repo.branch_decisions(remotes, context.allow_force)?;
-    let had_branch_conflicts = !conflicts.is_empty();
     let branches_to_push = branches
         .into_iter()
+        .filter(|branch| !blocked_branches.contains(&branch.branch))
         .filter(|branch| !branch.target_remotes.is_empty())
         .collect::<Vec<_>>();
+    let mut had_branch_conflicts = false;
     for conflict in conflicts {
+        if blocked_branches.contains(&conflict.branch) {
+            continue;
+        }
+        had_branch_conflicts = true;
         let details = conflict
             .tips
             .iter()
@@ -914,14 +978,32 @@ fn push_repo_refs(
     }
 
     if branches_to_push.is_empty() && tags_to_push.is_empty() {
+        if !branch_deletions.is_empty() {
+            print_branch_deletions(&branch_deletions);
+            mirror_repo.delete_branches(remotes, &branch_deletions)?;
+            return Ok(RepoRefSyncResult {
+                pushed: true,
+                had_conflicts: had_deletion_conflicts,
+            });
+        }
+        if had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts {
+            return Ok(RepoRefSyncResult {
+                pushed: false,
+                had_conflicts: true,
+            });
+        }
         crate::logln!(
             "  {} branches and tags already match all endpoints",
             style("up-to-date").green().bold()
         );
         return Ok(RepoRefSyncResult {
             pushed: false,
-            had_conflicts: had_branch_conflicts || had_tag_conflicts,
+            had_conflicts: had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts,
         });
+    }
+    if !branch_deletions.is_empty() {
+        print_branch_deletions(&branch_deletions);
+        mirror_repo.delete_branches(remotes, &branch_deletions)?;
     }
     if !branches_to_push.is_empty() {
         print_branch_decisions(&branches_to_push);
@@ -933,8 +1015,100 @@ fn push_repo_refs(
     }
     Ok(RepoRefSyncResult {
         pushed: true,
-        had_conflicts: had_branch_conflicts || had_tag_conflicts,
+        had_conflicts: had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts,
     })
+}
+
+struct BranchDeletionConflict {
+    branch: String,
+    deleted_remotes: Vec<String>,
+    changed_remotes: Vec<String>,
+}
+
+fn branch_deletion_decisions(
+    remotes: &[RemoteSpec],
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> (
+    Vec<BranchDeletion>,
+    Vec<BranchDeletionConflict>,
+    BTreeSet<String>,
+) {
+    let Some(previous_refs) = previous_refs else {
+        return (Vec::new(), Vec::new(), BTreeSet::new());
+    };
+    let remote_names = remotes
+        .iter()
+        .map(|remote| remote.name.clone())
+        .collect::<Vec<_>>();
+    let mut branches = BTreeSet::new();
+    for refs in previous_refs.values() {
+        branches.extend(refs.branches.keys().cloned());
+    }
+
+    let mut deletions = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut blocked = BTreeSet::new();
+    for branch in branches {
+        let previous_remotes = remote_names
+            .iter()
+            .filter(|remote| {
+                previous_refs
+                    .get(*remote)
+                    .is_some_and(|refs| refs.branches.contains_key(&branch))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if previous_remotes.len() != remote_names.len() {
+            continue;
+        }
+
+        let mut deleted_remotes = Vec::new();
+        let mut target_remotes = Vec::new();
+        let mut changed_remotes = Vec::new();
+        for remote in &remote_names {
+            let current = current_refs
+                .get(remote)
+                .and_then(|refs| refs.branches.get(&branch));
+            let previous = previous_refs
+                .get(remote)
+                .and_then(|refs| refs.branches.get(&branch));
+            match (previous, current) {
+                (Some(_), None) => deleted_remotes.push(remote.clone()),
+                (Some(previous), Some(current)) if previous == current => {
+                    target_remotes.push(remote.clone());
+                }
+                (Some(_), Some(_)) => {
+                    target_remotes.push(remote.clone());
+                    changed_remotes.push(remote.clone());
+                }
+                _ => {}
+            }
+        }
+
+        if deleted_remotes.is_empty() {
+            continue;
+        }
+        blocked.insert(branch.clone());
+        if target_remotes.is_empty() {
+            continue;
+        }
+        if changed_remotes.is_empty() {
+            deletions.push(BranchDeletion {
+                branch,
+                deleted_remotes,
+                target_remotes,
+            });
+        } else {
+            conflicts.push(BranchDeletionConflict {
+                branch,
+                deleted_remotes,
+                changed_remotes,
+            });
+        }
+    }
+
+    (deletions, conflicts, blocked)
 }
 
 struct RepoRefSyncResult {
@@ -957,6 +1131,26 @@ fn print_branch_decisions(branches: &[crate::git::BranchDecision]) {
                 "{} -> {}",
                 branch.source_remotes.join("+"),
                 branch.target_remotes.join("+")
+            ))
+            .dim()
+        );
+    }
+}
+
+fn print_branch_deletions(deletions: &[BranchDeletion]) {
+    crate::logln!(
+        "  {} {}",
+        style("deleted branches").red().bold(),
+        style(format!("({})", deletions.len())).dim()
+    );
+    for deletion in deletions {
+        crate::logln!(
+            "    {} {}",
+            style(&deletion.branch).cyan(),
+            style(format!(
+                "deleted on {} -> {}",
+                deletion.deleted_remotes.join("+"),
+                deletion.target_remotes.join("+")
             ))
             .dim()
         );
@@ -1052,17 +1246,11 @@ mod tests {
         let mut refs = BTreeMap::new();
         refs.insert(
             "github_alice".to_string(),
-            RemoteRefState {
-                hash: "abc".to_string(),
-                refs: 2,
-            },
+            remote_ref_state("abc", &[("main", "111")]),
         );
         refs.insert(
             "gitea_alice".to_string(),
-            RemoteRefState {
-                hash: "def".to_string(),
-                refs: 2,
-            },
+            remote_ref_state("def", &[("main", "111")]),
         );
         let mut state = RefState::default();
         state.set_repo("sync-1", "repo-a", refs.clone());
@@ -1075,15 +1263,99 @@ mod tests {
         let mut changed_hash = refs.clone();
         changed_hash.insert(
             "github_alice".to_string(),
-            RemoteRefState {
-                hash: "changed".to_string(),
-                refs: 2,
-            },
+            remote_ref_state("changed", &[("main", "111")]),
         );
         assert!(!loaded.repo_matches("sync-1", "repo-a", &changed_hash));
 
         let mut missing_remote = refs;
         missing_remote.remove("gitea_alice");
         assert!(!loaded.repo_matches("sync-1", "repo-a", &missing_remote));
+    }
+
+    #[test]
+    fn branch_deletion_decisions_propagate_previous_synced_branch_deletion() {
+        let remotes = test_remotes();
+        let mut previous = BTreeMap::new();
+        previous.insert(
+            "github".to_string(),
+            remote_ref_state("a", &[("main", "111")]),
+        );
+        previous.insert(
+            "gitea".to_string(),
+            remote_ref_state("b", &[("main", "111")]),
+        );
+        let mut current = BTreeMap::new();
+        current.insert("github".to_string(), remote_ref_state("c", &[]));
+        current.insert(
+            "gitea".to_string(),
+            remote_ref_state("d", &[("main", "111")]),
+        );
+
+        let (deletions, conflicts, blocked) =
+            branch_deletion_decisions(&remotes, Some(&previous), &current);
+
+        assert!(conflicts.is_empty());
+        assert!(blocked.contains("main"));
+        assert_eq!(deletions.len(), 1);
+        assert_eq!(deletions[0].branch, "main");
+        assert_eq!(deletions[0].deleted_remotes, vec!["github".to_string()]);
+        assert_eq!(deletions[0].target_remotes, vec!["gitea".to_string()]);
+    }
+
+    #[test]
+    fn branch_deletion_decisions_conflict_when_branch_changed_elsewhere() {
+        let remotes = test_remotes();
+        let mut previous = BTreeMap::new();
+        previous.insert(
+            "github".to_string(),
+            remote_ref_state("a", &[("main", "111")]),
+        );
+        previous.insert(
+            "gitea".to_string(),
+            remote_ref_state("b", &[("main", "111")]),
+        );
+        let mut current = BTreeMap::new();
+        current.insert("github".to_string(), remote_ref_state("c", &[]));
+        current.insert(
+            "gitea".to_string(),
+            remote_ref_state("d", &[("main", "222")]),
+        );
+
+        let (deletions, conflicts, blocked) =
+            branch_deletion_decisions(&remotes, Some(&previous), &current);
+
+        assert!(deletions.is_empty());
+        assert!(blocked.contains("main"));
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].branch, "main");
+        assert_eq!(conflicts[0].deleted_remotes, vec!["github".to_string()]);
+        assert_eq!(conflicts[0].changed_remotes, vec!["gitea".to_string()]);
+    }
+
+    fn remote_ref_state(hash: &str, branches: &[(&str, &str)]) -> RemoteRefState {
+        RemoteRefState {
+            hash: hash.to_string(),
+            refs: branches.len(),
+            branches: branches
+                .iter()
+                .map(|(branch, sha)| ((*branch).to_string(), (*sha).to_string()))
+                .collect(),
+            tags: BTreeMap::new(),
+        }
+    }
+
+    fn test_remotes() -> Vec<RemoteSpec> {
+        vec![
+            RemoteSpec {
+                name: "github".to_string(),
+                url: "https://github.invalid/alice/repo.git".to_string(),
+                display: "github:alice:User".to_string(),
+            },
+            RemoteSpec {
+                name: "gitea".to_string(),
+                url: "https://gitea.invalid/alice/repo.git".to_string(),
+                display: "gitea:alice:User".to_string(),
+            },
+        ]
     }
 }
