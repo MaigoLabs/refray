@@ -109,6 +109,27 @@ impl GitMirror {
         self.run(["fetch", "--prune", &remote.name, &tag_refspec])
     }
 
+    pub fn cached_remote_refs_match(
+        &self,
+        remote: &RemoteSpec,
+        expected: &RemoteRefSnapshot,
+    ) -> Result<bool> {
+        if !self.path.exists() || self.dry_run {
+            return Ok(false);
+        }
+        let branches = self.remote_branches(&remote.name)?;
+        let tags = self.remote_tags(&remote.name)?;
+        let mut refs = Vec::with_capacity(branches.len() + tags.len());
+        for (branch, sha) in branches {
+            refs.push(format!("{sha}\trefs/heads/{branch}"));
+        }
+        for (tag, sha) in tags {
+            refs.push(format!("{sha}\trefs/tags/{tag}"));
+        }
+        let snapshot = snapshot_from_refs(refs);
+        Ok(&snapshot == expected)
+    }
+
     pub fn branch_decisions(
         &self,
         remotes: &[RemoteSpec],
@@ -432,18 +453,23 @@ pub fn ls_remote_refs(remote: &RemoteSpec, redactor: &Redactor) -> Result<Remote
         return Err(GitCommandError::new("git ls-remote", stdout, stderr).into());
     }
 
-    let mut refs = String::from_utf8_lossy(&output.stdout)
+    let refs = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
+
+    Ok(snapshot_from_refs(refs))
+}
+
+fn snapshot_from_refs(mut refs: Vec<String>) -> RemoteRefSnapshot {
     refs.sort();
 
-    Ok(RemoteRefSnapshot {
+    RemoteRefSnapshot {
         hash: stable_ref_hash(&refs),
         refs: refs.len(),
-    })
+    }
 }
 
 fn stable_ref_hash(refs: &[String]) -> String {
@@ -696,6 +722,35 @@ mod tests {
         let main = find_branch(&decisions, "main");
         assert_eq!(main.source_remotes, vec!["a".to_string(), "b".to_string()]);
         assert!(main.target_remotes.is_empty());
+    }
+
+    #[test]
+    fn cached_remote_refs_match_ls_remote_snapshot_after_fetch() {
+        let fixture = GitFixture::new();
+        fixture.commit("base", "base", 1_700_000_000);
+        fixture.tag("v1");
+        fixture.push_head(&fixture.remote_a, "main");
+        fixture.push_tag(&fixture.remote_a, "v1");
+
+        let mirror = fixture.mirror();
+        let remote = fixture.remotes().remove(0);
+        assert!(
+            !mirror
+                .cached_remote_refs_match(
+                    &remote,
+                    &ls_remote_refs(&remote, &Redactor::new(Vec::new())).unwrap(),
+                )
+                .unwrap()
+        );
+
+        mirror.fetch_remote(&remote).unwrap();
+        let snapshot = ls_remote_refs(&remote, &Redactor::new(Vec::new())).unwrap();
+        assert!(mirror.cached_remote_refs_match(&remote, &snapshot).unwrap());
+
+        fixture.commit("newer", "newer", 1_700_000_100);
+        fixture.push_head(&fixture.remote_a, "main");
+        let changed = ls_remote_refs(&remote, &Redactor::new(Vec::new())).unwrap();
+        assert!(!mirror.cached_remote_refs_match(&remote, &changed).unwrap());
     }
 
     #[test]

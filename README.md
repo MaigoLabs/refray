@@ -134,7 +134,7 @@ git-sync sync --jobs 8
 
 While jobs run, the bottom of the terminal shows one live status line per worker. When a repository finishes, its detailed log is printed as one complete block above those status lines. The default is 4 workers; use `--jobs 1` for serial sync.
 
-`git-sync` stores a small ref cache in the work directory. On later runs it first checks each repository with `git ls-remote --heads --tags`; when all endpoints report the same refs as the last successful sync, it skips the full fetch/push pass for that repository.
+`git-sync` stores a small ref cache in the work directory. On later runs it first checks each repository with `git ls-remote --heads --tags`; when all endpoints report the same refs as the last successful sync, or the existing local bare mirror cache already has those refs, it skips the full fetch/push pass for that repository.
 
 Use cron or another scheduler for automatic execution:
 
