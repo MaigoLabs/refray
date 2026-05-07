@@ -769,4 +769,5 @@ fn fixed_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/webhook.rs"]
 mod tests;

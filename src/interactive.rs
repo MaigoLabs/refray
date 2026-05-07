@@ -564,6 +564,7 @@ fn pat_instruction_lines(provider: &ProviderKind, base_url: &str) -> Vec<String>
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/interactive_test_io.rs"]
 mod test_io;
 #[cfg(test)]
 use test_io::*;
@@ -913,4 +914,5 @@ fn generate_webhook_secret() -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/interactive.rs"]
 mod tests;

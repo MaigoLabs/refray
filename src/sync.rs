@@ -24,12 +24,12 @@ use self::output::{
     print_branch_decisions, print_branch_deletions, print_failure, print_failure_summary,
     print_tag_decisions, short_sha,
 };
+#[cfg(test)]
+use self::state::{FailedRepo, failure_state_path};
 use self::state::{
     FailureState, RefState, RemoteRefState, SyncFailure, load_failure_state, load_ref_state,
     save_failure_state, save_ref_state,
 };
-#[cfg(test)]
-use self::state::{FailedRepo, failure_state_path};
 
 pub const DEFAULT_JOBS: usize = 4;
 
@@ -936,4 +936,5 @@ struct RepoRefSyncResult {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/sync.rs"]
 mod tests;
