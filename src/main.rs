@@ -122,7 +122,6 @@ enum ProviderArg {
     Gitlab,
     Gitea,
     Forgejo,
-    Tangled,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -306,7 +305,6 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Gitlab => Self::Gitlab,
             ProviderArg::Gitea => Self::Gitea,
             ProviderArg::Forgejo => Self::Forgejo,
-            ProviderArg::Tangled => Self::Tangled,
         }
     }
 }
@@ -403,10 +401,7 @@ mod tests {
 
     #[test]
     fn cli_accepts_new_provider_kinds() {
-        for (name, expected) in [
-            ("forgejo", ProviderKind::Forgejo),
-            ("tangled", ProviderKind::Tangled),
-        ] {
+        for (name, expected) in [("forgejo", ProviderKind::Forgejo)] {
             let cli = Cli::try_parse_from([
                 "git-sync",
                 "config",

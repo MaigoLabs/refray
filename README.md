@@ -8,10 +8,9 @@ Supported providers:
 - GitLab
 - Gitea
 - Forgejo
-- Tangled
 
 The program uses provider APIs to list and create repositories, then uses the local `git` CLI to fetch and push branches and tags.
-Forgejo uses the same API shape as Gitea. Tangled support lists existing `sh.tangled.repo` records from the account's AT Protocol PDS and uses SSH remotes; automatic Tangled repository creation is not supported yet, so create Tangled repos first or use `create_missing = false` for groups that include Tangled.
+Forgejo uses the same API shape as Gitea.
 
 ## Install
 
@@ -52,7 +51,6 @@ PAT quick setup:
 - GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=git-sync&scopes=api`, create the token, then copy it.
 - Gitea: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 - Forgejo: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
-- Tangled: open `https://tangled.org/settings/keys` and add an SSH key. `git-sync` currently still requires a token field in the site config; use a placeholder value because Tangled Git access goes through SSH.
 
 Add sites. Prefer `--token-env` so PATs do not live in shell history or the config file.
 
@@ -77,7 +75,6 @@ For self-hosted providers, `--base-url` is the web root. API URLs default to:
 - GitLab: `<base-url>/api/v4`
 - Gitea: `<base-url>/api/v1`
 - Forgejo: `<base-url>/api/v1`
-- Tangled: AT Protocol PDS discovered from the endpoint namespace's DID document
 
 Override with `--api-url` if your instance is different.
 

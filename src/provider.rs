@@ -45,7 +45,6 @@ impl<'a> ProviderClient<'a> {
             ProviderKind::Gitlab => self.gitlab_list_repos(endpoint),
             ProviderKind::Gitea => self.gitea_list_repos(endpoint),
             ProviderKind::Forgejo => self.gitea_list_repos(endpoint),
-            ProviderKind::Tangled => self.tangled_list_repos(endpoint),
         }
     }
 
@@ -67,14 +66,10 @@ impl<'a> ProviderClient<'a> {
             ProviderKind::Forgejo => {
                 self.gitea_create_repo(endpoint, name, visibility, description)
             }
-            ProviderKind::Tangled => self.tangled_create_repo(),
         }
     }
 
     pub fn validate_token(&self) -> Result<()> {
-        if matches!(self.site.provider, ProviderKind::Tangled) {
-            return Ok(());
-        }
         let url = format!("{}/user", self.site.api_base());
         self.get(&url).map(|_| ())
     }
@@ -85,15 +80,10 @@ impl<'a> ProviderClient<'a> {
             ProviderKind::Gitlab => self.gitlab_detect_namespace_kind(namespace),
             ProviderKind::Gitea => self.gitea_detect_namespace_kind(namespace),
             ProviderKind::Forgejo => self.gitea_detect_namespace_kind(namespace),
-            ProviderKind::Tangled => self.tangled_detect_namespace_kind(namespace),
         }
     }
 
     pub fn authenticated_clone_url(&self, clone_url: &str) -> Result<String> {
-        if matches!(self.site.provider, ProviderKind::Tangled) {
-            return Ok(clone_url.to_string());
-        }
-
         let mut url = Url::parse(clone_url)
             .or_else(|_| Url::parse(&format!("{}/{}", self.site.base_url, clone_url)))
             .with_context(|| format!("failed to parse clone URL '{clone_url}'"))?;
@@ -110,7 +100,6 @@ impl<'a> ProviderClient<'a> {
                 ProviderKind::Gitlab | ProviderKind::Gitea | ProviderKind::Forgejo => {
                     "oauth2".to_string()
                 }
-                ProviderKind::Tangled => unreachable!("Tangled clone URLs are returned above"),
             });
         url.set_username(&username)
             .map_err(|_| anyhow!("failed to set username on clone URL"))?;
@@ -321,92 +310,6 @@ impl<'a> ProviderClient<'a> {
         Ok(None)
     }
 
-    fn tangled_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
-        match endpoint.kind {
-            NamespaceKind::User => {}
-            NamespaceKind::Org | NamespaceKind::Group => {
-                bail!("Tangled endpoints use kind 'user'")
-            }
-        }
-
-        let did = self.tangled_resolve_namespace(&endpoint.namespace)?;
-        let pds = self.tangled_pds_for_did(&did)?;
-        let records = self.tangled_repo_records(&pds, &did)?;
-        Ok(records
-            .into_iter()
-            .map(|record| RemoteRepo {
-                name: record.value.name.clone(),
-                clone_url: tangled_ssh_url(&record.value.knot, &did, &record.value.name),
-                private: false,
-                description: record.value.description,
-            })
-            .collect())
-    }
-
-    fn tangled_create_repo(&self) -> Result<RemoteRepo> {
-        bail!(
-            "automatic Tangled repository creation is not supported; create the repository on tangled.org first or set create_missing = false"
-        )
-    }
-
-    fn tangled_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
-        self.tangled_resolve_namespace(namespace)
-            .map(|_| Some(NamespaceKind::User))
-    }
-
-    fn tangled_resolve_namespace(&self, namespace: &str) -> Result<String> {
-        let namespace = normalized_tangled_namespace(namespace);
-        if namespace.starts_with("did:") {
-            return Ok(namespace);
-        }
-
-        let url = format!(
-            "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={}",
-            urlencoding(&namespace)
-        );
-        let response: AtprotoResolveHandle = self.get_json(&url)?;
-        Ok(response.did)
-    }
-
-    fn tangled_pds_for_did(&self, did: &str) -> Result<String> {
-        let url = did_document_url(did)?;
-        let document: DidDocument = self.get_json(&url)?;
-        document
-            .service
-            .into_iter()
-            .find(|service| {
-                service.id == "#atproto_pds" && service.kind == "AtprotoPersonalDataServer"
-            })
-            .map(|service| trim_url_end(&service.service_endpoint).to_string())
-            .ok_or_else(|| anyhow!("DID document for {did} does not declare an AT Protocol PDS"))
-    }
-
-    fn tangled_repo_records(&self, pds: &str, did: &str) -> Result<Vec<TangledRecord>> {
-        let mut records = Vec::new();
-        let mut cursor = None::<String>;
-
-        loop {
-            let mut url = format!(
-                "{}/xrpc/com.atproto.repo.listRecords?repo={}&collection=sh.tangled.repo&limit=100",
-                trim_url_end(pds),
-                urlencoding(did)
-            );
-            if let Some(cursor) = &cursor {
-                url.push_str("&cursor=");
-                url.push_str(&urlencoding(cursor));
-            }
-
-            let mut response: TangledListRecords = self.get_json(&url)?;
-            records.append(&mut response.records);
-            match response.cursor {
-                Some(next) if !next.is_empty() => cursor = Some(next),
-                _ => break,
-            }
-        }
-
-        Ok(records)
-    }
-
     fn paged_get<T>(&self, first_url: &str) -> Result<Vec<T>>
     where
         T: for<'de> Deserialize<'de>,
@@ -488,47 +391,8 @@ impl<'a> ProviderClient<'a> {
                         .context("PAT contains invalid header characters")?,
                 );
             }
-            ProviderKind::Tangled => {}
         }
         Ok(request.headers(headers))
-    }
-}
-
-fn normalized_tangled_namespace(namespace: &str) -> String {
-    namespace.trim().trim_start_matches('@').to_string()
-}
-
-fn tangled_ssh_url(knot: &str, did: &str, name: &str) -> String {
-    let knot = trim_url_scheme(knot);
-    format!("ssh://git@{}/{}/{}", knot, did, name)
-}
-
-fn trim_url_scheme(value: &str) -> String {
-    value
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string()
-}
-
-fn trim_url_end(value: &str) -> &str {
-    value.trim_end_matches('/')
-}
-
-fn did_document_url(did: &str) -> Result<String> {
-    if did.starts_with("did:plc:") {
-        return Ok(format!("https://plc.directory/{did}"));
-    }
-
-    let Some(rest) = did.strip_prefix("did:web:") else {
-        bail!("unsupported DID method for Tangled namespace '{did}'");
-    };
-    let mut parts = rest.split(':').collect::<Vec<_>>();
-    let domain = parts.remove(0);
-    if parts.is_empty() {
-        Ok(format!("https://{domain}/.well-known/did.json"))
-    } else {
-        Ok(format!("https://{domain}/{}/did.json", parts.join("/")))
     }
 }
 
@@ -636,45 +500,6 @@ impl From<GiteaRepo> for RemoteRepo {
     }
 }
 
-#[derive(Deserialize)]
-struct AtprotoResolveHandle {
-    did: String,
-}
-
-#[derive(Deserialize)]
-struct DidDocument {
-    #[serde(default)]
-    service: Vec<DidService>,
-}
-
-#[derive(Deserialize)]
-struct DidService {
-    id: String,
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(rename = "serviceEndpoint")]
-    service_endpoint: String,
-}
-
-#[derive(Deserialize)]
-struct TangledListRecords {
-    #[serde(default)]
-    records: Vec<TangledRecord>,
-    cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TangledRecord {
-    value: TangledRepoRecord,
-}
-
-#[derive(Deserialize)]
-struct TangledRepoRecord {
-    name: String,
-    knot: String,
-    description: Option<String>,
-}
-
 pub fn repos_by_name(repos: Vec<EndpointRepo>) -> HashMap<String, Vec<EndpointRepo>> {
     let mut output: HashMap<String, Vec<EndpointRepo>> = HashMap::new();
     for repo in repos {
@@ -729,15 +554,6 @@ mod tests {
                 .unwrap(),
             "https://oauth2:secret@forgejo.example.test/alice/repo.git"
         );
-
-        let tangled_site = site(ProviderKind::Tangled, None);
-        let tangled = ProviderClient::new(&tangled_site).unwrap();
-        assert_eq!(
-            tangled
-                .authenticated_clone_url("ssh://git@knot1.tangled.sh/did:plc:alice/repo")
-                .unwrap(),
-            "ssh://git@knot1.tangled.sh/did:plc:alice/repo"
-        );
     }
 
     #[test]
@@ -756,26 +572,6 @@ mod tests {
     #[test]
     fn group_paths_are_url_encoded_for_gitlab() {
         assert_eq!(urlencoding("parent/child group"), "parent%2Fchild+group");
-    }
-
-    #[test]
-    fn tangled_helpers_normalize_urls_and_dids() {
-        assert_eq!(
-            normalized_tangled_namespace("@alice.example"),
-            "alice.example"
-        );
-        assert_eq!(
-            tangled_ssh_url("https://knot1.tangled.sh/", "did:plc:alice", "repo"),
-            "ssh://git@knot1.tangled.sh/did:plc:alice/repo"
-        );
-        assert_eq!(
-            did_document_url("did:plc:abc").unwrap(),
-            "https://plc.directory/did:plc:abc"
-        );
-        assert_eq!(
-            did_document_url("did:web:example.com:user:alice").unwrap(),
-            "https://example.com/user/alice/did.json"
-        );
     }
 
     #[test]
