@@ -677,4 +677,5 @@ pub fn safe_remote_name(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/git.rs"]
 mod tests;

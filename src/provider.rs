@@ -747,4 +747,5 @@ pub fn repos_by_name(repos: Vec<EndpointRepo>) -> HashMap<String, Vec<EndpointRe
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/provider.rs"]
 mod tests;
