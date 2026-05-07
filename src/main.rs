@@ -3,11 +3,12 @@ mod git;
 mod interactive;
 mod logging;
 mod provider;
+mod state;
 mod sync;
 mod webhook;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -120,8 +121,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Config => interactive::run_config_wizard(&config_path),
         Command::Sync(command) => {
-            let config = Config::load(&config_path)
-                .with_context(|| format!("failed to load config at {}", config_path.display()))?;
+            let config = load_config(&config_path)?;
             sync_all(
                 &config,
                 SyncOptions {
@@ -137,8 +137,7 @@ fn main() -> Result<()> {
             )
         }
         Command::Serve(command) => {
-            let config = Config::load(&config_path)
-                .with_context(|| format!("failed to load config at {}", config_path.display()))?;
+            let config = load_config(&config_path)?;
             let full_sync_interval_minutes = command.full_sync_interval_minutes.or_else(|| {
                 config
                     .webhook
@@ -165,8 +164,7 @@ fn main() -> Result<()> {
             )
         }
         Command::Webhook(WebhookCommand::Install(command)) => {
-            let config = Config::load(&config_path)
-                .with_context(|| format!("failed to load config at {}", config_path.display()))?;
+            let config = load_config(&config_path)?;
             let secret = resolve_webhook_secret(&config, command.secret, command.secret_env)?;
             let url = resolve_webhook_url(&config, command.url)?;
             install_webhooks(
@@ -182,8 +180,7 @@ fn main() -> Result<()> {
             )
         }
         Command::Webhook(WebhookCommand::Uninstall(command)) => {
-            let config = Config::load(&config_path)
-                .with_context(|| format!("failed to load config at {}", config_path.display()))?;
+            let config = load_config(&config_path)?;
             uninstall_webhooks(
                 &config,
                 WebhookUninstallOptions {
@@ -194,6 +191,10 @@ fn main() -> Result<()> {
             )
         }
     }
+}
+
+fn load_config(path: &Path) -> Result<Config> {
+    Config::load(path).with_context(|| format!("failed to load config at {}", path.display()))
 }
 
 fn resolve_webhook_secret(
