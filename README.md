@@ -160,7 +160,7 @@ Branch conflict handling is intentionally conservative:
 - If branch tips diverged, that branch is skipped and reported.
 - If `allow_force = true` or `git-sync sync --force` is used, a diverged branch chooses the newest commit timestamp and force-pushes it.
 
-Branch deletion is not propagated. If a branch exists on one endpoint and is missing elsewhere, it is recreated elsewhere. This avoids accidental data loss in a bidirectional mirror.
+Branch deletion is propagated only when it is safe to infer intent. If a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `git-sync` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
 
 Tags are fetched into provider-specific cache refs and pushed only when the tag object agrees across providers or exists on one side. Divergent tags are skipped and reported. Tag deletion is not propagated.
 

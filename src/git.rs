@@ -19,6 +19,8 @@ pub struct RemoteSpec {
 pub struct RemoteRefSnapshot {
     pub hash: String,
     pub refs: usize,
+    pub branches: BTreeMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +35,13 @@ pub struct BranchDecision {
 pub struct BranchConflict {
     pub branch: String,
     pub tips: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BranchDeletion {
+    pub branch: String,
+    pub deleted_remotes: Vec<String>,
+    pub target_remotes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -114,8 +123,17 @@ impl GitMirror {
         remote: &RemoteSpec,
         expected: &RemoteRefSnapshot,
     ) -> Result<bool> {
+        Ok(self
+            .cached_remote_ref_snapshot(remote)?
+            .is_some_and(|snapshot| &snapshot == expected))
+    }
+
+    pub fn cached_remote_ref_snapshot(
+        &self,
+        remote: &RemoteSpec,
+    ) -> Result<Option<RemoteRefSnapshot>> {
         if !self.path.exists() || self.dry_run {
-            return Ok(false);
+            return Ok(None);
         }
         let branches = self.remote_branches(&remote.name)?;
         let tags = self.remote_tags(&remote.name)?;
@@ -126,8 +144,7 @@ impl GitMirror {
         for (tag, sha) in tags {
             refs.push(format!("{sha}\trefs/tags/{tag}"));
         }
-        let snapshot = snapshot_from_refs(refs);
-        Ok(&snapshot == expected)
+        Ok(Some(snapshot_from_refs(refs)))
     }
 
     pub fn branch_decisions(
@@ -302,6 +319,30 @@ impl GitMirror {
         Ok(())
     }
 
+    pub fn delete_branches(
+        &self,
+        remotes: &[RemoteSpec],
+        deletions: &[BranchDeletion],
+    ) -> Result<()> {
+        for remote in remotes {
+            for deletion in deletions {
+                if !deletion.target_remotes.contains(&remote.name) {
+                    continue;
+                }
+                let refspec = format!(":refs/heads/{}", deletion.branch);
+                crate::logln!(
+                    "  {} {} {} {}",
+                    style("delete").red().bold(),
+                    style("branch").dim(),
+                    style(&deletion.branch).cyan(),
+                    style(format!("-> {}", remote.display)).dim()
+                );
+                self.run(["push", &remote.name, &refspec])?;
+            }
+        }
+        Ok(())
+    }
+
     fn remote_url(&self, name: &str) -> Result<Option<String>> {
         let output = Command::new("git")
             .arg("--git-dir")
@@ -465,10 +506,24 @@ pub fn ls_remote_refs(remote: &RemoteSpec, redactor: &Redactor) -> Result<Remote
 
 fn snapshot_from_refs(mut refs: Vec<String>) -> RemoteRefSnapshot {
     refs.sort();
+    let mut branches = BTreeMap::new();
+    let mut tags = BTreeMap::new();
+    for line in &refs {
+        let Some((sha, reference)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(branch) = reference.strip_prefix("refs/heads/") {
+            branches.insert(branch.to_string(), sha.to_string());
+        } else if let Some(tag) = reference.strip_prefix("refs/tags/") {
+            tags.insert(tag.to_string(), sha.to_string());
+        }
+    }
 
     RemoteRefSnapshot {
         hash: stable_ref_hash(&refs),
         refs: refs.len(),
+        branches,
+        tags,
     }
 }
 
@@ -823,6 +878,29 @@ mod tests {
     }
 
     #[test]
+    fn delete_branches_removes_branch_from_target_remotes() {
+        let fixture = GitFixture::new();
+        fixture.commit("base", "base", 1_700_000_000);
+        fixture.push_head(&fixture.remote_a, "main");
+        fixture.push_head(&fixture.remote_b, "main");
+
+        let mirror = fixture.mirror();
+        mirror
+            .delete_branches(
+                &fixture.remotes(),
+                &[BranchDeletion {
+                    branch: "main".to_string(),
+                    deleted_remotes: vec!["a".to_string()],
+                    target_remotes: vec!["b".to_string()],
+                }],
+            )
+            .unwrap();
+
+        assert!(fixture.remote_ref_exists(&fixture.remote_a, "refs/heads/main"));
+        assert!(!fixture.remote_ref_exists(&fixture.remote_b, "refs/heads/main"));
+    }
+
+    #[test]
     fn tag_decisions_mirror_matching_or_missing_tags_and_skip_divergent_tags() {
         let fixture = GitFixture::new();
         let base = fixture.commit("base", "base", 1_700_000_000);
@@ -1015,6 +1093,23 @@ mod tests {
                     reference,
                 ],
             )
+        }
+
+        fn remote_ref_exists(&self, remote: &Path, reference: &str) -> bool {
+            git_command(
+                None,
+                [
+                    "--git-dir",
+                    remote.to_str().unwrap(),
+                    "rev-parse",
+                    "--verify",
+                    reference,
+                ],
+            )
+            .output()
+            .unwrap()
+            .status
+            .success()
         }
     }
 
