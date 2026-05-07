@@ -69,6 +69,37 @@ impl<'a> ProviderClient<'a> {
         }
     }
 
+    pub fn install_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        url: &str,
+        secret: &str,
+    ) -> Result<()> {
+        match self.site.provider {
+            ProviderKind::Github => self.github_install_webhook(endpoint, repo, url, secret),
+            ProviderKind::Gitlab => self.gitlab_install_webhook(endpoint, repo, url, secret),
+            ProviderKind::Gitea | ProviderKind::Forgejo => {
+                self.gitea_install_webhook(endpoint, repo, url, secret)
+            }
+        }
+    }
+
+    pub fn uninstall_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        url: &str,
+    ) -> Result<bool> {
+        match self.site.provider {
+            ProviderKind::Github => self.github_uninstall_webhook(endpoint, repo_name, url),
+            ProviderKind::Gitlab => self.gitlab_uninstall_webhook(endpoint, repo_name, url),
+            ProviderKind::Gitea | ProviderKind::Forgejo => {
+                self.gitea_uninstall_webhook(endpoint, repo_name, url)
+            }
+        }
+    }
+
     pub fn validate_token(&self) -> Result<()> {
         let url = format!("{}/user", self.site.api_base());
         self.get(&url).map(|_| ())
@@ -169,6 +200,60 @@ impl<'a> ProviderClient<'a> {
         })
     }
 
+    fn github_install_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        url: &str,
+        secret: &str,
+    ) -> Result<()> {
+        if matches!(endpoint.kind, NamespaceKind::Group) {
+            bail!("GitHub endpoints use kind 'user' or 'org'");
+        }
+        let hooks_url = format!(
+            "{}/repos/{}/{}/hooks",
+            self.site.api_base(),
+            endpoint.namespace,
+            repo.name
+        );
+        let body = json!({
+            "name": "web",
+            "active": true,
+            "events": ["push"],
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        });
+        if let Some(hook) = self.find_existing_hook(&hooks_url, url)? {
+            let update_url = format!("{hooks_url}/{}", hook.id);
+            self.patch_json::<serde_json::Value>(&update_url, &body)?;
+        } else {
+            self.post_json::<serde_json::Value>(&hooks_url, &body)?;
+        }
+        Ok(())
+    }
+
+    fn github_uninstall_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        url: &str,
+    ) -> Result<bool> {
+        if matches!(endpoint.kind, NamespaceKind::Group) {
+            bail!("GitHub endpoints use kind 'user' or 'org'");
+        }
+        let hooks_url = format!(
+            "{}/repos/{}/{}/hooks",
+            self.site.api_base(),
+            endpoint.namespace,
+            repo_name
+        );
+        self.delete_matching_hook(&hooks_url, url)
+    }
+
     fn gitlab_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
@@ -247,6 +332,50 @@ impl<'a> ProviderClient<'a> {
             .then_some(NamespaceKind::User))
     }
 
+    fn gitlab_install_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        url: &str,
+        secret: &str,
+    ) -> Result<()> {
+        let project = format!("{}/{}", endpoint.namespace, repo.name);
+        let hooks_url = format!(
+            "{}/projects/{}/hooks",
+            self.site.api_base(),
+            urlencoding(&project)
+        );
+        let body = json!({
+            "url": url,
+            "push_events": true,
+            "tag_push_events": true,
+            "token": secret,
+            "enable_ssl_verification": true,
+        });
+        if let Some(hook) = self.find_existing_hook(&hooks_url, url)? {
+            let update_url = format!("{hooks_url}/{}", hook.id);
+            self.put_json::<serde_json::Value>(&update_url, &body)?;
+        } else {
+            self.post_json::<serde_json::Value>(&hooks_url, &body)?;
+        }
+        Ok(())
+    }
+
+    fn gitlab_uninstall_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        url: &str,
+    ) -> Result<bool> {
+        let project = format!("{}/{}", endpoint.namespace, repo_name);
+        let hooks_url = format!(
+            "{}/projects/{}/hooks",
+            self.site.api_base(),
+            urlencoding(&project)
+        );
+        self.delete_matching_hook(&hooks_url, url)
+    }
+
     fn gitea_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
@@ -310,6 +439,75 @@ impl<'a> ProviderClient<'a> {
         Ok(None)
     }
 
+    fn gitea_install_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        url: &str,
+        secret: &str,
+    ) -> Result<()> {
+        if matches!(endpoint.kind, NamespaceKind::Group) {
+            bail!("Gitea endpoints use kind 'user' or 'org'");
+        }
+        let hooks_url = format!(
+            "{}/repos/{}/{}/hooks",
+            self.site.api_base(),
+            endpoint.namespace,
+            repo.name
+        );
+        let body = json!({
+            "type": "gitea",
+            "active": true,
+            "events": ["push"],
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+            },
+        });
+        if let Some(hook) = self.find_existing_hook(&hooks_url, url)? {
+            let update_url = format!("{hooks_url}/{}", hook.id);
+            self.patch_json::<serde_json::Value>(&update_url, &body)?;
+        } else {
+            self.post_json::<serde_json::Value>(&hooks_url, &body)?;
+        }
+        Ok(())
+    }
+
+    fn gitea_uninstall_webhook(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        url: &str,
+    ) -> Result<bool> {
+        if matches!(endpoint.kind, NamespaceKind::Group) {
+            bail!("Gitea endpoints use kind 'user' or 'org'");
+        }
+        let hooks_url = format!(
+            "{}/repos/{}/{}/hooks",
+            self.site.api_base(),
+            endpoint.namespace,
+            repo_name
+        );
+        self.delete_matching_hook(&hooks_url, url)
+    }
+
+    fn find_existing_hook(&self, hooks_url: &str, target_url: &str) -> Result<Option<RepoHook>> {
+        let hooks: Vec<RepoHook> = self.paged_get(hooks_url)?;
+        Ok(hooks
+            .into_iter()
+            .find(|hook| hook.url() == Some(target_url)))
+    }
+
+    fn delete_matching_hook(&self, hooks_url: &str, target_url: &str) -> Result<bool> {
+        let Some(hook) = self.find_existing_hook(hooks_url, target_url)? else {
+            return Ok(false);
+        };
+        let delete_url = format!("{hooks_url}/{}", hook.id);
+        self.delete(&delete_url)?;
+        Ok(true)
+    }
+
     fn paged_get<T>(&self, first_url: &str) -> Result<Vec<T>>
     where
         T: for<'de> Deserialize<'de>,
@@ -351,11 +549,44 @@ impl<'a> ProviderClient<'a> {
             .with_context(|| format!("invalid JSON from {url}"))
     }
 
+    fn put_json<T>(&self, url: &str, body: &serde_json::Value) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.request_headers(self.http.put(url))?
+            .json(body)
+            .send()
+            .with_context(|| format!("PUT {url} failed"))
+            .and_then(|response| check_response("PUT", url, response))?
+            .json()
+            .with_context(|| format!("invalid JSON from {url}"))
+    }
+
+    fn patch_json<T>(&self, url: &str, body: &serde_json::Value) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.request_headers(self.http.patch(url))?
+            .json(body)
+            .send()
+            .with_context(|| format!("PATCH {url} failed"))
+            .and_then(|response| check_response("PATCH", url, response))?
+            .json()
+            .with_context(|| format!("invalid JSON from {url}"))
+    }
+
     fn get(&self, url: &str) -> Result<Response> {
         self.request_headers(self.http.get(url))?
             .send()
             .with_context(|| format!("GET {url} failed"))
             .and_then(|response| check_response("GET", url, response))
+    }
+
+    fn delete(&self, url: &str) -> Result<Response> {
+        self.request_headers(self.http.delete(url))?
+            .send()
+            .with_context(|| format!("DELETE {url} failed"))
+            .and_then(|response| check_response("DELETE", url, response))
     }
 
     fn request_headers(
@@ -497,6 +728,23 @@ impl From<GiteaRepo> for RemoteRepo {
             private: value.private,
             description: value.description,
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct RepoHook {
+    id: u64,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    config: HashMap<String, String>,
+}
+
+impl RepoHook {
+    fn url(&self) -> Option<&str> {
+        self.url
+            .as_deref()
+            .or_else(|| self.config.get("url").map(String::as_str))
     }
 }
 
@@ -677,6 +925,97 @@ mod tests {
         handle.join().unwrap();
     }
 
+    #[test]
+    fn install_webhook_posts_github_hook_when_missing() {
+        let (api_url, handle) = request_server(
+            vec![("200 OK", "[]"), ("201 Created", r#"{"id":1}"#)],
+            |index, request| match index {
+                0 => assert!(
+                    request.starts_with("GET /repos/alice/repo/hooks "),
+                    "request was {request}"
+                ),
+                1 => {
+                    assert!(
+                        request.starts_with("POST /repos/alice/repo/hooks "),
+                        "request was {request}"
+                    );
+                    assert!(request.contains("https://mirror.example.test/webhook"));
+                    assert!(request.contains("secret"));
+                    assert!(request.contains("push"));
+                }
+                _ => unreachable!(),
+            },
+        );
+        let site = SiteConfig {
+            api_url: Some(api_url),
+            ..site(ProviderKind::Github, None)
+        };
+        let client = ProviderClient::new(&site).unwrap();
+
+        client
+            .install_webhook(
+                &EndpointConfig {
+                    site: "github".to_string(),
+                    kind: NamespaceKind::User,
+                    namespace: "alice".to_string(),
+                },
+                &RemoteRepo {
+                    name: "repo".to_string(),
+                    clone_url: "https://github.com/alice/repo.git".to_string(),
+                    private: true,
+                    description: None,
+                },
+                "https://mirror.example.test/webhook",
+                "secret",
+            )
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn uninstall_webhook_deletes_matching_github_hook() {
+        let (api_url, handle) = request_server(
+            vec![
+                (
+                    "200 OK",
+                    r#"[{"id":42,"config":{"url":"https://mirror.example.test/webhook"}}]"#,
+                ),
+                ("204 No Content", ""),
+            ],
+            |index, request| match index {
+                0 => assert!(
+                    request.starts_with("GET /repos/alice/repo/hooks "),
+                    "request was {request}"
+                ),
+                1 => assert!(
+                    request.starts_with("DELETE /repos/alice/repo/hooks/42 "),
+                    "request was {request}"
+                ),
+                _ => unreachable!(),
+            },
+        );
+        let site = SiteConfig {
+            api_url: Some(api_url),
+            ..site(ProviderKind::Github, None)
+        };
+        let client = ProviderClient::new(&site).unwrap();
+
+        let removed = client
+            .uninstall_webhook(
+                &EndpointConfig {
+                    site: "github".to_string(),
+                    kind: NamespaceKind::User,
+                    namespace: "alice".to_string(),
+                },
+                "repo",
+                "https://mirror.example.test/webhook",
+            )
+            .unwrap();
+
+        assert!(removed);
+        handle.join().unwrap();
+    }
+
     fn site(provider: ProviderKind, git_username: Option<String>) -> SiteConfig {
         SiteConfig {
             name: "site".to_string(),
@@ -711,6 +1050,34 @@ mod tests {
                 body.len()
             )
             .unwrap();
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn request_server<F>(
+        responses: Vec<(&'static str, &'static str)>,
+        mut assert_request: F,
+    ) -> (String, thread::JoinHandle<()>)
+    where
+        F: FnMut(usize, &str) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for (index, (status, body)) in responses.into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 4096];
+                let bytes = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                assert_request(index, &request);
+
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
         });
         (format!("http://{address}"), handle)
     }

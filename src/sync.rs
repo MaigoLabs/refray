@@ -16,6 +16,7 @@ use crate::git::{
 };
 use crate::logging;
 use crate::provider::{EndpointRepo, ProviderClient, repos_by_name};
+use crate::webhook;
 
 const FAILURE_STATE_FILE: &str = "failed-repos.toml";
 const REF_STATE_FILE: &str = "ref-state.toml";
@@ -361,24 +362,14 @@ fn sync_group(
         .unwrap_or(mirror.create_missing);
     let allow_force = context.options.force_override.unwrap_or(mirror.allow_force);
 
-    let mut all_endpoint_repos = Vec::new();
-    for endpoint in &mirror.endpoints {
-        let site = context.config.site(&endpoint.site).unwrap();
-        let client = ProviderClient::new(site)?;
-        crate::logln!(
-            "  {} {}",
-            style("list").cyan().bold(),
-            style(endpoint.label()).dim()
-        );
-        let repos = client
-            .list_repos(endpoint)
-            .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
-        for repo in repos {
-            all_endpoint_repos.push(EndpointRepo {
-                endpoint: endpoint.clone(),
-                repo,
-            });
-        }
+    let all_endpoint_repos = list_group_repos(context.config, mirror)?;
+    if !context.options.dry_run {
+        webhook::ensure_configured_webhooks(
+            context.config,
+            mirror,
+            &all_endpoint_repos,
+            context.work_dir,
+        )?;
     }
 
     let mut repos = repos_by_name(all_endpoint_repos);
@@ -538,7 +529,35 @@ fn sync_group(
         failures
     });
 
+    if create_missing && !context.options.dry_run {
+        let repos = list_group_repos(context.config, mirror)?;
+        webhook::ensure_configured_webhooks(context.config, mirror, &repos, context.work_dir)?;
+    }
+
     Ok(failures)
+}
+
+fn list_group_repos(config: &Config, mirror: &MirrorConfig) -> Result<Vec<EndpointRepo>> {
+    let mut all_endpoint_repos = Vec::new();
+    for endpoint in &mirror.endpoints {
+        let site = config.site(&endpoint.site).unwrap();
+        let client = ProviderClient::new(site)?;
+        crate::logln!(
+            "  {} {}",
+            style("list").cyan().bold(),
+            style(endpoint.label()).dim()
+        );
+        let repos = client
+            .list_repos(endpoint)
+            .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
+        for repo in repos {
+            all_endpoint_repos.push(EndpointRepo {
+                endpoint: endpoint.clone(),
+                repo,
+            });
+        }
+    }
+    Ok(all_endpoint_repos)
 }
 
 fn pop_repo_job(queue: &Arc<Mutex<VecDeque<RepoSyncJob>>>) -> Option<RepoSyncJob> {
