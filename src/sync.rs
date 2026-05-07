@@ -230,6 +230,15 @@ impl From<RemoteRefSnapshot> for RemoteRefState {
     }
 }
 
+impl From<&RemoteRefState> for RemoteRefSnapshot {
+    fn from(value: &RemoteRefState) -> Self {
+        Self {
+            hash: value.hash.clone(),
+            refs: value.refs,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct RefState {
     #[serde(default)]
@@ -659,8 +668,9 @@ fn sync_repo(
     let Some(initial_ref_state) = check_remote_refs(context, repo_name, &initial_remotes)? else {
         return Ok(RepoSyncOutcome::default());
     };
+    let all_endpoints_present = all_configured_endpoints_present(context.mirror, repos);
     if !context.dry_run
-        && all_configured_endpoints_present(context.mirror, repos)
+        && all_endpoints_present
         && ref_state.repo_matches(&context.mirror.name, repo_name, &initial_ref_state)
     {
         crate::logln!(
@@ -677,6 +687,19 @@ fn sync_repo(
     let mirror_repo = GitMirror::open(path, context.redactor.clone(), context.dry_run)?;
 
     mirror_repo.configure_remotes(&initial_remotes)?;
+    if !context.dry_run
+        && all_endpoints_present
+        && cached_refs_match(&mirror_repo, &initial_remotes, &initial_ref_state)?
+    {
+        crate::logln!(
+            "  {} refs unchanged from local mirror cache",
+            style("up-to-date").green().bold()
+        );
+        return Ok(RepoSyncOutcome {
+            ref_update: Some(initial_ref_state),
+        });
+    }
+
     for remote in &initial_remotes {
         if let Err(error) = mirror_repo.fetch_remote(remote) {
             if is_disabled_repository_error(&error) {
@@ -761,6 +784,22 @@ fn all_configured_endpoints_present(mirror: &MirrorConfig, repos: &[EndpointRepo
         .endpoints
         .iter()
         .all(|endpoint| present.contains(endpoint))
+}
+
+fn cached_refs_match(
+    mirror_repo: &GitMirror,
+    remotes: &[RemoteSpec],
+    expected_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<bool> {
+    for remote in remotes {
+        let Some(expected) = expected_refs.get(&remote.name) else {
+            return Ok(false);
+        };
+        if !mirror_repo.cached_remote_refs_match(remote, &RemoteRefSnapshot::from(expected))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn check_remote_refs(
