@@ -44,6 +44,7 @@ impl<'a> ProviderClient<'a> {
             ProviderKind::Github => self.github_list_repos(endpoint),
             ProviderKind::Gitlab => self.gitlab_list_repos(endpoint),
             ProviderKind::Gitea => self.gitea_list_repos(endpoint),
+            ProviderKind::Forgejo => self.gitea_list_repos(endpoint),
         }
     }
 
@@ -62,6 +63,9 @@ impl<'a> ProviderClient<'a> {
                 self.gitlab_create_repo(endpoint, name, visibility, description)
             }
             ProviderKind::Gitea => self.gitea_create_repo(endpoint, name, visibility, description),
+            ProviderKind::Forgejo => {
+                self.gitea_create_repo(endpoint, name, visibility, description)
+            }
         }
     }
 
@@ -75,6 +79,7 @@ impl<'a> ProviderClient<'a> {
             ProviderKind::Github => self.github_detect_namespace_kind(namespace),
             ProviderKind::Gitlab => self.gitlab_detect_namespace_kind(namespace),
             ProviderKind::Gitea => self.gitea_detect_namespace_kind(namespace),
+            ProviderKind::Forgejo => self.gitea_detect_namespace_kind(namespace),
         }
     }
 
@@ -92,7 +97,9 @@ impl<'a> ProviderClient<'a> {
             .clone()
             .unwrap_or_else(|| match self.site.provider {
                 ProviderKind::Github => "x-access-token".to_string(),
-                ProviderKind::Gitlab | ProviderKind::Gitea => "oauth2".to_string(),
+                ProviderKind::Gitlab | ProviderKind::Gitea | ProviderKind::Forgejo => {
+                    "oauth2".to_string()
+                }
             });
         url.set_username(&username)
             .map_err(|_| anyhow!("failed to set username on clone URL"))?;
@@ -262,7 +269,7 @@ impl<'a> ProviderClient<'a> {
                 let repos: Vec<GiteaRepo> = self.paged_get(&url)?;
                 Ok(repos.into_iter().map(Into::into).collect())
             }
-            NamespaceKind::Group => bail!("Gitea endpoints use kind 'user' or 'org'"),
+            NamespaceKind::Group => bail!("Gitea/Forgejo endpoints use kind 'user' or 'org'"),
         }
     }
 
@@ -278,7 +285,7 @@ impl<'a> ProviderClient<'a> {
             NamespaceKind::Org => {
                 format!("{}/orgs/{}/repos", self.site.api_base(), endpoint.namespace)
             }
-            NamespaceKind::Group => bail!("Gitea endpoints use kind 'user' or 'org'"),
+            NamespaceKind::Group => bail!("Gitea/Forgejo endpoints use kind 'user' or 'org'"),
         };
         let body = json!({
             "name": name,
@@ -377,7 +384,7 @@ impl<'a> ProviderClient<'a> {
                         .context("PAT contains invalid header characters")?,
                 );
             }
-            ProviderKind::Gitea => {
+            ProviderKind::Gitea | ProviderKind::Forgejo => {
                 headers.insert(
                     AUTHORIZATION,
                     HeaderValue::from_str(&format!("token {}", self.token))
@@ -537,6 +544,15 @@ mod tests {
                 .authenticated_clone_url("https://gitlab.example.test/alice/repo.git")
                 .unwrap(),
             "https://oauth2:secret@gitlab.example.test/alice/repo.git"
+        );
+
+        let forgejo_site = site(ProviderKind::Forgejo, None);
+        let forgejo = ProviderClient::new(&forgejo_site).unwrap();
+        assert_eq!(
+            forgejo
+                .authenticated_clone_url("https://forgejo.example.test/alice/repo.git")
+                .unwrap(),
+            "https://oauth2:secret@forgejo.example.test/alice/repo.git"
         );
     }
 

@@ -7,8 +7,10 @@ Supported providers:
 - GitHub
 - GitLab
 - Gitea
+- Forgejo
 
 The program uses provider APIs to list and create repositories, then uses the local `git` CLI to fetch and push branches and tags.
+Forgejo uses the same API shape as Gitea.
 
 ## Install
 
@@ -48,6 +50,7 @@ PAT quick setup:
 - GitHub: open `https://github.com/settings/tokens`, create a classic PAT with `repo` permissions, then copy the token.
 - GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=git-sync&scopes=api`, create the token, then copy it.
 - Gitea: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
+- Forgejo: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 
 Add sites. Prefer `--token-env` so PATs do not live in shell history or the config file.
 
@@ -71,6 +74,7 @@ For self-hosted providers, `--base-url` is the web root. API URLs default to:
 - GitHub Enterprise: `<base-url>/api/v3`
 - GitLab: `<base-url>/api/v4`
 - Gitea: `<base-url>/api/v1`
+- Forgejo: `<base-url>/api/v1`
 
 Override with `--api-url` if your instance is different.
 

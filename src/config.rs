@@ -33,6 +33,7 @@ pub enum ProviderKind {
     Github,
     Gitlab,
     Gitea,
+    Forgejo,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -190,6 +191,7 @@ impl SiteConfig {
             }
             ProviderKind::Gitlab => format!("{}/api/v4", trim_end(&self.base_url)),
             ProviderKind::Gitea => format!("{}/api/v1", trim_end(&self.base_url)),
+            ProviderKind::Forgejo => format!("{}/api/v1", trim_end(&self.base_url)),
         }
     }
 }
@@ -399,6 +401,14 @@ mod tests {
             }
             .api_base(),
             "https://gitea.example.test/api/v1"
+        );
+        assert_eq!(
+            SiteConfig {
+                base_url: "https://forgejo.example.test".to_string(),
+                ..site("forgejo", ProviderKind::Forgejo)
+            }
+            .api_base(),
+            "https://forgejo.example.test/api/v1"
         );
     }
 

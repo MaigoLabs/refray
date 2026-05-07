@@ -121,6 +121,7 @@ enum ProviderArg {
     Github,
     Gitlab,
     Gitea,
+    Forgejo,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -303,6 +304,7 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Github => Self::Github,
             ProviderArg::Gitlab => Self::Gitlab,
             ProviderArg::Gitea => Self::Gitea,
+            ProviderArg::Forgejo => Self::Forgejo,
         }
     }
 }
@@ -395,6 +397,32 @@ mod tests {
             panic!("parsed unexpected command");
         };
         assert_eq!(args.jobs, 8);
+    }
+
+    #[test]
+    fn cli_accepts_new_provider_kinds() {
+        for (name, expected) in [("forgejo", ProviderKind::Forgejo)] {
+            let cli = Cli::try_parse_from([
+                "git-sync",
+                "config",
+                "site",
+                "add",
+                "--name",
+                name,
+                "--provider",
+                name,
+                "--base-url",
+                "https://example.test",
+                "--token",
+                "token",
+            ])
+            .unwrap();
+
+            let Command::Config(ConfigCommand::Site(SiteCommand::Add(args))) = cli.command else {
+                panic!("parsed unexpected command");
+            };
+            assert_eq!(ProviderKind::from(args.provider), expected);
+        }
     }
 
     #[test]
