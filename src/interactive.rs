@@ -369,7 +369,7 @@ fn matching_sites<'a>(config: &'a Config, target: &ProfileTarget) -> Vec<&'a Sit
 }
 
 fn prompt_provider_styled(theme: &ColorfulTheme, base_url: &str) -> Result<ProviderKind> {
-    let options = ["GitHub", "GitLab", "Gitea"];
+    let options = ["GitHub", "GitLab", "Gitea", "Forgejo", "Tangled"];
     let index = Select::with_theme(theme)
         .with_prompt(format!("Provider for {base_url}"))
         .items(options)
@@ -378,7 +378,9 @@ fn prompt_provider_styled(theme: &ColorfulTheme, base_url: &str) -> Result<Provi
     Ok(match index {
         0 => ProviderKind::Github,
         1 => ProviderKind::Gitlab,
-        _ => ProviderKind::Gitea,
+        2 => ProviderKind::Gitea,
+        3 => ProviderKind::Forgejo,
+        _ => ProviderKind::Tangled,
     })
 }
 
@@ -476,6 +478,17 @@ fn pat_instruction_lines(provider: &ProviderKind, base_url: &str) -> Vec<String>
             "Create a personal access token with repository permissions.".to_string(),
             format!("Open: {url}"),
             "Generate a new token, allow repository access, then paste it here.".to_string(),
+        ],
+        ProviderKind::Forgejo => vec![
+            "Create a personal access token with repository permissions.".to_string(),
+            format!("Open: {url}"),
+            "Generate a new token, allow repository access, then paste it here.".to_string(),
+        ],
+        ProviderKind::Tangled => vec![
+            "Add an SSH key for Git access.".to_string(),
+            format!("Open: {url}"),
+            "Tangled sync uses SSH remotes; paste any placeholder token to save this site."
+                .to_string(),
         ],
     }
 }
@@ -686,7 +699,12 @@ where
             "github" => return Ok(ProviderKind::Github),
             "gitlab" => return Ok(ProviderKind::Gitlab),
             "gitea" => return Ok(ProviderKind::Gitea),
-            _ => writeln!(writer, "Provider must be github, gitlab, or gitea.")?,
+            "forgejo" => return Ok(ProviderKind::Forgejo),
+            "tangled" => return Ok(ProviderKind::Tangled),
+            _ => writeln!(
+                writer,
+                "Provider must be github, gitlab, gitea, forgejo, or tangled."
+            )?,
         }
     }
 }
@@ -842,6 +860,10 @@ fn known_provider_from_host(host: &str) -> Option<ProviderKind> {
         Some(ProviderKind::Github)
     } else if host == "gitlab.com" || host.ends_with(".gitlab.com") || host.contains("gitlab") {
         Some(ProviderKind::Gitlab)
+    } else if host == "tangled.org" || host.ends_with(".tangled.org") || host.contains("tangled") {
+        Some(ProviderKind::Tangled)
+    } else if host == "codeberg.org" || host.contains("forgejo") {
+        Some(ProviderKind::Forgejo)
     } else if host.contains("gitea") {
         Some(ProviderKind::Gitea)
     } else {
@@ -855,6 +877,14 @@ fn detect_provider_from_instance(base_url: &str) -> Option<ProviderKind> {
         .build()
         .ok()?;
     let base = trim_url_end(base_url);
+    if client
+        .get(format!("{base}/api/forgejo/v1/version"))
+        .send()
+        .ok()
+        .is_some_and(|response| response.status().is_success())
+    {
+        return Some(ProviderKind::Forgejo);
+    }
     if client
         .get(format!("{base}/api/v1/version"))
         .send()
@@ -937,7 +967,7 @@ fn detect_namespace_kind_public(
                 .is_some_and(|items| !items.is_empty())
                 .then_some(NamespaceKind::User)
         }
-        ProviderKind::Gitea => {
+        ProviderKind::Gitea | ProviderKind::Forgejo => {
             if client
                 .get(format!("{api_base}/orgs/{namespace}"))
                 .send()
@@ -948,6 +978,22 @@ fn detect_namespace_kind_public(
             }
             client
                 .get(format!("{api_base}/users/{namespace}"))
+                .send()
+                .ok()
+                .is_some_and(|response| response.status().is_success())
+                .then_some(NamespaceKind::User)
+        }
+        ProviderKind::Tangled => {
+            let namespace = normalize_tangled_namespace(namespace);
+            if namespace.starts_with("did:") {
+                return Some(NamespaceKind::User);
+            }
+            let url = format!(
+                "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={}",
+                urlencoding(&namespace)
+            );
+            client
+                .get(url)
                 .send()
                 .ok()
                 .is_some_and(|response| response.status().is_success())
@@ -1003,6 +1049,8 @@ fn default_base_url(provider: &ProviderKind) -> &'static str {
         ProviderKind::Github => "https://github.com",
         ProviderKind::Gitlab => "https://gitlab.com",
         ProviderKind::Gitea => "https://gitea.example.com",
+        ProviderKind::Forgejo => "https://forgejo.example.com",
+        ProviderKind::Tangled => "https://tangled.org",
     }
 }
 
@@ -1065,6 +1113,8 @@ fn provider_slug(provider: &ProviderKind) -> &'static str {
         ProviderKind::Github => "github",
         ProviderKind::Gitlab => "gitlab",
         ProviderKind::Gitea => "gitea",
+        ProviderKind::Forgejo => "forgejo",
+        ProviderKind::Tangled => "tangled",
     }
 }
 
@@ -1078,7 +1128,13 @@ fn token_creation_url(provider: &ProviderKind, base_url: &str) -> String {
             format!("{base}/-/user_settings/personal_access_tokens?name=git-sync&scopes=api")
         }
         ProviderKind::Gitea => format!("{base}/user/settings/applications"),
+        ProviderKind::Forgejo => format!("{base}/user/settings/applications"),
+        ProviderKind::Tangled => format!("{base}/settings/keys"),
     }
+}
+
+fn normalize_tangled_namespace(namespace: &str) -> String {
+    namespace.trim().trim_start_matches('@').to_string()
 }
 
 fn ensure_url_scheme(value: &str) -> String {
@@ -1448,6 +1504,14 @@ mod tests {
         assert_eq!(
             token_creation_url(&ProviderKind::Gitea, "gitea.example.test"),
             "https://gitea.example.test/user/settings/applications"
+        );
+        assert_eq!(
+            token_creation_url(&ProviderKind::Forgejo, "forgejo.example.test"),
+            "https://forgejo.example.test/user/settings/applications"
+        );
+        assert_eq!(
+            token_creation_url(&ProviderKind::Tangled, "https://tangled.org"),
+            "https://tangled.org/settings/keys"
         );
     }
 }
