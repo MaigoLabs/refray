@@ -1,10 +1,16 @@
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 
 use anyhow::{Context, Result, anyhow, bail};
+use bytes::Bytes;
+use gitlab::api::{self, Pagination, Query};
+use octocrab::{Octocrab, Page};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
+use tokio::runtime::Runtime;
 use url::Url;
 
 use crate::config::{EndpointConfig, NamespaceKind, ProviderKind, SiteConfig, Visibility};
@@ -27,25 +33,82 @@ pub struct ProviderClient<'a> {
     site: &'a SiteConfig,
     token: String,
     http: Client,
+    runtime: Runtime,
+    github: Option<Octocrab>,
+    gitlab: Option<GitlabApiClient>,
+}
+
+macro_rules! dispatch_provider {
+    ($provider:expr, github => $github:expr, gitlab => $gitlab:expr, gitea_like => $gitea:expr $(,)?) => {
+        match $provider {
+            ProviderKind::Github => $github,
+            ProviderKind::Gitlab => $gitlab,
+            ProviderKind::Gitea | ProviderKind::Forgejo => $gitea,
+        }
+    };
+}
+
+macro_rules! json_method {
+    ($name:ident, $method:ident, $verb:literal) => {
+        fn $name<T>(&self, url: &str, body: &serde_json::Value) -> Result<T>
+        where
+            T: for<'de> Deserialize<'de>,
+        {
+            self.request_headers(self.http.$method(url))?
+                .json(body)
+                .send()
+                .with_context(|| format!("{} {} failed", $verb, url))
+                .and_then(|response| check_response($verb, url, response))?
+                .json()
+                .with_context(|| format!("invalid JSON from {url}"))
+        }
+    };
 }
 
 impl<'a> ProviderClient<'a> {
     pub fn new(site: &'a SiteConfig) -> Result<Self> {
         let token = site.token()?;
+        let http = Client::builder().build()?;
+        let runtime = Runtime::new().context("failed to create async API runtime")?;
+        let github = if matches!(site.provider, ProviderKind::Github) {
+            let _runtime_context = runtime.enter();
+            Some(
+                Octocrab::builder()
+                    .personal_token(token.clone())
+                    .base_uri(site.api_base())
+                    .context("invalid GitHub API base URL")?
+                    .build()
+                    .context("failed to create GitHub API client")?,
+            )
+        } else {
+            None
+        };
+        let gitlab = if matches!(site.provider, ProviderKind::Gitlab) {
+            Some(GitlabApiClient::new(
+                site.api_base(),
+                token.clone(),
+                http.clone(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             site,
             token,
-            http: Client::builder().build()?,
+            http,
+            runtime,
+            github,
+            gitlab,
         })
     }
 
     pub fn list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
-        match self.site.provider {
-            ProviderKind::Github => self.github_list_repos(endpoint),
-            ProviderKind::Gitlab => self.gitlab_list_repos(endpoint),
-            ProviderKind::Gitea => self.gitea_list_repos(endpoint),
-            ProviderKind::Forgejo => self.gitea_list_repos(endpoint),
-        }
+        dispatch_provider!(
+            self.site.provider,
+            github => self.github_list_repos(endpoint),
+            gitlab => self.gitlab_list_repos(endpoint),
+            gitea_like => self.gitea_list_repos(endpoint),
+        )
     }
 
     pub fn create_repo(
@@ -55,18 +118,12 @@ impl<'a> ProviderClient<'a> {
         visibility: &Visibility,
         description: Option<&str>,
     ) -> Result<RemoteRepo> {
-        match self.site.provider {
-            ProviderKind::Github => {
-                self.github_create_repo(endpoint, name, visibility, description)
-            }
-            ProviderKind::Gitlab => {
-                self.gitlab_create_repo(endpoint, name, visibility, description)
-            }
-            ProviderKind::Gitea => self.gitea_create_repo(endpoint, name, visibility, description),
-            ProviderKind::Forgejo => {
-                self.gitea_create_repo(endpoint, name, visibility, description)
-            }
-        }
+        dispatch_provider!(
+            self.site.provider,
+            github => self.github_create_repo(endpoint, name, visibility, description),
+            gitlab => self.gitlab_create_repo(endpoint, name, visibility, description),
+            gitea_like => self.gitea_create_repo(endpoint, name, visibility, description),
+        )
     }
 
     pub fn install_webhook(
@@ -76,13 +133,12 @@ impl<'a> ProviderClient<'a> {
         url: &str,
         secret: &str,
     ) -> Result<()> {
-        match self.site.provider {
-            ProviderKind::Github => self.github_install_webhook(endpoint, repo, url, secret),
-            ProviderKind::Gitlab => self.gitlab_install_webhook(endpoint, repo, url, secret),
-            ProviderKind::Gitea | ProviderKind::Forgejo => {
-                self.gitea_install_webhook(endpoint, repo, url, secret)
-            }
-        }
+        dispatch_provider!(
+            self.site.provider,
+            github => self.github_install_webhook(endpoint, repo, url, secret),
+            gitlab => self.gitlab_install_webhook(endpoint, repo, url, secret),
+            gitea_like => self.gitea_install_webhook(endpoint, repo, url, secret),
+        )
     }
 
     pub fn uninstall_webhook(
@@ -91,27 +147,36 @@ impl<'a> ProviderClient<'a> {
         repo_name: &str,
         url: &str,
     ) -> Result<bool> {
-        match self.site.provider {
-            ProviderKind::Github => self.github_uninstall_webhook(endpoint, repo_name, url),
-            ProviderKind::Gitlab => self.gitlab_uninstall_webhook(endpoint, repo_name, url),
-            ProviderKind::Gitea | ProviderKind::Forgejo => {
-                self.gitea_uninstall_webhook(endpoint, repo_name, url)
-            }
-        }
+        dispatch_provider!(
+            self.site.provider,
+            github => self.github_uninstall_webhook(endpoint, repo_name, url),
+            gitlab => self.gitlab_uninstall_webhook(endpoint, repo_name, url),
+            gitea_like => self.gitea_uninstall_webhook(endpoint, repo_name, url),
+        )
     }
 
     pub fn validate_token(&self) -> Result<()> {
-        let url = format!("{}/user", self.site.api_base());
-        self.get(&url).map(|_| ())
+        dispatch_provider!(
+            self.site.provider,
+            github => self.github_get_json::<serde_json::Value>("/user").map(|_| ()),
+            gitlab => self.gitlab_query::<serde_json::Value, _>(
+                gitlab::api::users::CurrentUser::builder().build()?,
+            )
+            .map(|_| ()),
+            gitea_like => {
+                let url = format!("{}/user", self.site.api_base());
+                self.get(&url).map(|_| ())
+            },
+        )
     }
 
     pub fn detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
-        match self.site.provider {
-            ProviderKind::Github => self.github_detect_namespace_kind(namespace),
-            ProviderKind::Gitlab => self.gitlab_detect_namespace_kind(namespace),
-            ProviderKind::Gitea => self.gitea_detect_namespace_kind(namespace),
-            ProviderKind::Forgejo => self.gitea_detect_namespace_kind(namespace),
-        }
+        dispatch_provider!(
+            self.site.provider,
+            github => self.github_detect_namespace_kind(namespace),
+            gitlab => self.gitlab_detect_namespace_kind(namespace),
+            gitea_like => self.gitea_detect_namespace_kind(namespace),
+        )
     }
 
     pub fn authenticated_clone_url(&self, clone_url: &str) -> Result<String> {
@@ -139,15 +204,134 @@ impl<'a> ProviderClient<'a> {
         Ok(url.to_string())
     }
 
+    fn github(&self) -> Result<&Octocrab> {
+        self.github
+            .as_ref()
+            .ok_or_else(|| anyhow!("GitHub API client is not configured"))
+    }
+
+    fn github_paged<T>(&self, route: &str) -> Result<Vec<T>>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let github = self.github()?;
+        let page = self
+            .runtime
+            .block_on(github.get::<Page<T>, _, _>(route, None::<&()>))
+            .with_context(|| format!("GitHub GET {route} failed"))?;
+        self.runtime
+            .block_on(github.all_pages(page))
+            .with_context(|| format!("GitHub pagination for {route} failed"))
+    }
+
+    fn github_get_json<T>(&self, route: &str) -> Result<T>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        self.runtime
+            .block_on(self.github()?.get(route, None::<&()>))
+            .with_context(|| format!("GitHub GET {route} failed"))
+    }
+
+    fn github_post<T>(&self, route: &str, body: &serde_json::Value) -> Result<T>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        self.runtime
+            .block_on(self.github()?.post(route, Some(body)))
+            .with_context(|| format!("GitHub POST {route} failed"))
+    }
+
+    fn github_patch<T>(&self, route: &str, body: &serde_json::Value) -> Result<T>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        self.runtime
+            .block_on(self.github()?.patch(route, Some(body)))
+            .with_context(|| format!("GitHub PATCH {route} failed"))
+    }
+
+    fn github_delete(&self, route: &str) -> Result<()> {
+        let github = self.github()?;
+        self.runtime.block_on(async {
+            let response = github._delete(route, None::<&()>).await?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                let status = response.status();
+                let body = github.body_to_string(response).await.unwrap_or_default();
+                bail!("GitHub DELETE {route} returned {status}: {body}")
+            }
+        })
+    }
+
+    fn github_find_existing_hook(
+        &self,
+        hooks_route: &str,
+        target_url: &str,
+    ) -> Result<Option<RepoHook>> {
+        let hooks: Vec<RepoHook> = self.github_paged(hooks_route)?;
+        Ok(hooks
+            .into_iter()
+            .find(|hook| hook.url() == Some(target_url)))
+    }
+
+    fn gitlab(&self) -> Result<&GitlabApiClient> {
+        self.gitlab
+            .as_ref()
+            .ok_or_else(|| anyhow!("GitLab API client is not configured"))
+    }
+
+    fn gitlab_query<T, E>(&self, endpoint: E) -> Result<T>
+    where
+        T: DeserializeOwned,
+        E: api::Endpoint,
+    {
+        endpoint
+            .query(self.gitlab()?)
+            .map_err(|error| anyhow!("GitLab API request failed: {error}"))
+    }
+
+    fn gitlab_paged<T, E>(&self, endpoint: E) -> Result<Vec<T>>
+    where
+        T: DeserializeOwned + 'static,
+        E: api::Endpoint + api::Pageable,
+    {
+        api::paged(endpoint, Pagination::All)
+            .query(self.gitlab()?)
+            .map_err(|error| anyhow!("GitLab paged API request failed: {error}"))
+    }
+
+    fn gitlab_ignore<E>(&self, endpoint: E) -> Result<()>
+    where
+        E: api::Endpoint,
+    {
+        api::ignore(endpoint)
+            .query(self.gitlab()?)
+            .map_err(|error| anyhow!("GitLab API request failed: {error}"))
+    }
+
+    fn gitlab_find_existing_hook(
+        &self,
+        project: &str,
+        target_url: &str,
+    ) -> Result<Option<RepoHook>> {
+        let endpoint = gitlab::api::projects::hooks::Hooks::builder()
+            .project(project)
+            .build()?;
+        let hooks: Vec<RepoHook> = self.gitlab_paged(endpoint)?;
+        Ok(hooks
+            .into_iter()
+            .find(|hook| hook.url() == Some(target_url)))
+    }
+
     fn github_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
-                let url = format!(
-                    "{}/user/repos?affiliation=owner&visibility=all&per_page=100",
-                    self.site.api_base()
-                );
                 let repos: Vec<GithubRepo> = self
-                    .paged_get(&url)?
+                    .github_paged::<GithubRepo>(
+                        "/user/repos?affiliation=owner&visibility=all&per_page=100",
+                    )?
                     .into_iter()
                     .filter(|repo: &GithubRepo| {
                         repo.owner.login.eq_ignore_ascii_case(&endpoint.namespace)
@@ -156,12 +340,8 @@ impl<'a> ProviderClient<'a> {
                 Ok(repos.into_iter().map(Into::into).collect())
             }
             NamespaceKind::Org => {
-                let url = format!(
-                    "{}/orgs/{}/repos?type=all&per_page=100",
-                    self.site.api_base(),
-                    endpoint.namespace
-                );
-                let repos: Vec<GithubRepo> = self.paged_get(&url)?;
+                let route = format!("/orgs/{}/repos?type=all&per_page=100", endpoint.namespace);
+                let repos: Vec<GithubRepo> = self.github_paged(&route)?;
                 Ok(repos.into_iter().map(Into::into).collect())
             }
             NamespaceKind::Group => bail!("GitHub endpoints use kind 'user' or 'org'"),
@@ -175,11 +355,9 @@ impl<'a> ProviderClient<'a> {
         visibility: &Visibility,
         description: Option<&str>,
     ) -> Result<RemoteRepo> {
-        let url = match endpoint.kind {
-            NamespaceKind::User => format!("{}/user/repos", self.site.api_base()),
-            NamespaceKind::Org => {
-                format!("{}/orgs/{}/repos", self.site.api_base(), endpoint.namespace)
-            }
+        let route = match endpoint.kind {
+            NamespaceKind::User => "/user/repos".to_string(),
+            NamespaceKind::Org => format!("/orgs/{}/repos", endpoint.namespace),
             NamespaceKind::Group => bail!("GitHub endpoints use kind 'user' or 'org'"),
         };
         let body = json!({
@@ -187,12 +365,12 @@ impl<'a> ProviderClient<'a> {
             "private": matches!(visibility, Visibility::Private),
             "description": description.unwrap_or(""),
         });
-        self.post_json::<GithubRepo>(&url, &body).map(Into::into)
+        self.github_post::<GithubRepo>(&route, &body)
+            .map(Into::into)
     }
 
     fn github_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
-        let url = format!("{}/users/{namespace}", self.site.api_base());
-        let value: serde_json::Value = self.get_json(&url)?;
+        let value: serde_json::Value = self.github_get_json(&format!("/users/{namespace}"))?;
         Ok(match value.get("type").and_then(|value| value.as_str()) {
             Some("Organization") => Some(NamespaceKind::Org),
             Some("User") => Some(NamespaceKind::User),
@@ -210,12 +388,7 @@ impl<'a> ProviderClient<'a> {
         if matches!(endpoint.kind, NamespaceKind::Group) {
             bail!("GitHub endpoints use kind 'user' or 'org'");
         }
-        let hooks_url = format!(
-            "{}/repos/{}/{}/hooks",
-            self.site.api_base(),
-            endpoint.namespace,
-            repo.name
-        );
+        let hooks_route = format!("/repos/{}/{}/hooks", endpoint.namespace, repo.name);
         let body = json!({
             "name": "web",
             "active": true,
@@ -227,11 +400,11 @@ impl<'a> ProviderClient<'a> {
                 "insecure_ssl": "0",
             },
         });
-        if let Some(hook) = self.find_existing_hook(&hooks_url, url)? {
-            let update_url = format!("{hooks_url}/{}", hook.id);
-            self.patch_json::<serde_json::Value>(&update_url, &body)?;
+        if let Some(hook) = self.github_find_existing_hook(&hooks_route, url)? {
+            let update_route = format!("{hooks_route}/{}", hook.id);
+            self.github_patch::<serde_json::Value>(&update_route, &body)?;
         } else {
-            self.post_json::<serde_json::Value>(&hooks_url, &body)?;
+            self.github_post::<serde_json::Value>(&hooks_route, &body)?;
         }
         Ok(())
     }
@@ -245,34 +418,32 @@ impl<'a> ProviderClient<'a> {
         if matches!(endpoint.kind, NamespaceKind::Group) {
             bail!("GitHub endpoints use kind 'user' or 'org'");
         }
-        let hooks_url = format!(
-            "{}/repos/{}/{}/hooks",
-            self.site.api_base(),
-            endpoint.namespace,
-            repo_name
-        );
-        self.delete_matching_hook(&hooks_url, url)
+        let hooks_route = format!("/repos/{}/{}/hooks", endpoint.namespace, repo_name);
+        let Some(hook) = self.github_find_existing_hook(&hooks_route, url)? else {
+            return Ok(false);
+        };
+        self.github_delete(&format!("{hooks_route}/{}", hook.id))?;
+        Ok(true)
     }
 
     fn gitlab_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
-                let url = format!(
-                    "{}/users/{}/projects?simple=true&per_page=100&owned=true",
-                    self.site.api_base(),
-                    endpoint.namespace
-                );
-                let repos: Vec<GitlabProject> = self.paged_get(&url)?;
+                let endpoint = gitlab::api::users::UserProjects::builder()
+                    .user(endpoint.namespace.as_str())
+                    .simple(true)
+                    .owned(true)
+                    .build()?;
+                let repos: Vec<GitlabProject> = self.gitlab_paged(endpoint)?;
                 Ok(repos.into_iter().map(Into::into).collect())
             }
             NamespaceKind::Org | NamespaceKind::Group => {
-                let encoded = urlencoding(&endpoint.namespace);
-                let url = format!(
-                    "{}/groups/{}/projects?simple=true&include_subgroups=false&per_page=100",
-                    self.site.api_base(),
-                    encoded
-                );
-                let repos: Vec<GitlabProject> = self.paged_get(&url)?;
+                let endpoint = gitlab::api::groups::projects::GroupProjects::builder()
+                    .group(endpoint.namespace.as_str())
+                    .simple(true)
+                    .include_subgroups(false)
+                    .build()?;
+                let repos: Vec<GitlabProject> = self.gitlab_paged(endpoint)?;
                 Ok(repos.into_iter().map(Into::into).collect())
             }
         }
@@ -285,51 +456,42 @@ impl<'a> ProviderClient<'a> {
         visibility: &Visibility,
         description: Option<&str>,
     ) -> Result<RemoteRepo> {
-        let mut body = serde_json::Map::from_iter([
-            ("name".to_string(), json!(name)),
-            ("path".to_string(), json!(name)),
-            (
-                "visibility".to_string(),
-                json!(match visibility {
-                    Visibility::Private => "private",
-                    Visibility::Public => "public",
-                }),
-            ),
-            ("description".to_string(), json!(description.unwrap_or(""))),
-        ]);
-
+        let mut builder = gitlab::api::projects::CreateProject::builder();
+        builder
+            .name(name)
+            .path(name)
+            .visibility(gitlab_visibility(visibility))
+            .description(description.unwrap_or(""));
         if matches!(endpoint.kind, NamespaceKind::Org | NamespaceKind::Group) {
             let group = self.gitlab_group(&endpoint.namespace)?;
-            body.insert("namespace_id".to_string(), json!(group.id));
+            builder.namespace_id(group.id);
         }
-
-        let url = format!("{}/projects", self.site.api_base());
-        self.post_json::<GitlabProject>(&url, &serde_json::Value::Object(body))
+        self.gitlab_query::<GitlabProject, _>(builder.build()?)
             .map(Into::into)
     }
 
     fn gitlab_group(&self, namespace: &str) -> Result<GitlabGroup> {
-        let url = format!("{}/groups/{}", self.site.api_base(), urlencoding(namespace));
-        self.get_json(&url)
+        self.gitlab_query(
+            gitlab::api::groups::Group::builder()
+                .group(namespace)
+                .build()?,
+        )
     }
 
     fn gitlab_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
-        let group_url = format!("{}/groups/{}", self.site.api_base(), urlencoding(namespace));
-        if self.get(&group_url).is_ok() {
+        let group = gitlab::api::groups::Group::builder()
+            .group(namespace)
+            .build()?;
+        if self.gitlab_query::<serde_json::Value, _>(group).is_ok() {
             return Ok(Some(NamespaceKind::Group));
         }
 
         let username = namespace.rsplit('/').next().unwrap_or(namespace);
-        let user_url = format!(
-            "{}/users?username={}",
-            self.site.api_base(),
-            urlencoding(username)
-        );
-        let users: serde_json::Value = self.get_json(&user_url)?;
-        Ok(users
-            .as_array()
-            .is_some_and(|items| !items.is_empty())
-            .then_some(NamespaceKind::User))
+        let users = gitlab::api::users::Users::builder()
+            .username(username)
+            .build()?;
+        let users: Vec<serde_json::Value> = self.gitlab_query(users)?;
+        Ok((!users.is_empty()).then_some(NamespaceKind::User))
     }
 
     fn gitlab_install_webhook(
@@ -340,23 +502,27 @@ impl<'a> ProviderClient<'a> {
         secret: &str,
     ) -> Result<()> {
         let project = format!("{}/{}", endpoint.namespace, repo.name);
-        let hooks_url = format!(
-            "{}/projects/{}/hooks",
-            self.site.api_base(),
-            urlencoding(&project)
-        );
-        let body = json!({
-            "url": url,
-            "push_events": true,
-            "tag_push_events": true,
-            "token": secret,
-            "enable_ssl_verification": true,
-        });
-        if let Some(hook) = self.find_existing_hook(&hooks_url, url)? {
-            let update_url = format!("{hooks_url}/{}", hook.id);
-            self.put_json::<serde_json::Value>(&update_url, &body)?;
+        if let Some(hook) = self.gitlab_find_existing_hook(&project, url)? {
+            let endpoint = gitlab::api::projects::hooks::EditHook::builder()
+                .project(project)
+                .hook_id(hook.id)
+                .url(url)
+                .push_events(true)
+                .tag_push_events(true)
+                .token(secret)
+                .enable_ssl_verification(true)
+                .build()?;
+            self.gitlab_ignore(endpoint)?;
         } else {
-            self.post_json::<serde_json::Value>(&hooks_url, &body)?;
+            let endpoint = gitlab::api::projects::hooks::CreateHook::builder()
+                .project(project)
+                .url(url)
+                .push_events(true)
+                .tag_push_events(true)
+                .token(secret)
+                .enable_ssl_verification(true)
+                .build()?;
+            self.gitlab_ignore(endpoint)?;
         }
         Ok(())
     }
@@ -368,12 +534,15 @@ impl<'a> ProviderClient<'a> {
         url: &str,
     ) -> Result<bool> {
         let project = format!("{}/{}", endpoint.namespace, repo_name);
-        let hooks_url = format!(
-            "{}/projects/{}/hooks",
-            self.site.api_base(),
-            urlencoding(&project)
-        );
-        self.delete_matching_hook(&hooks_url, url)
+        let Some(hook) = self.gitlab_find_existing_hook(&project, url)? else {
+            return Ok(false);
+        };
+        let endpoint = gitlab::api::projects::hooks::DeleteHook::builder()
+            .project(project)
+            .hook_id(hook.id)
+            .build()?;
+        self.gitlab_ignore(endpoint)?;
+        Ok(true)
     }
 
     fn gitea_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
@@ -527,53 +696,8 @@ impl<'a> ProviderClient<'a> {
         Ok(output)
     }
 
-    fn get_json<T>(&self, url: &str) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.get(url)?
-            .json()
-            .with_context(|| format!("invalid JSON from {url}"))
-    }
-
-    fn post_json<T>(&self, url: &str, body: &serde_json::Value) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.request_headers(self.http.post(url))?
-            .json(body)
-            .send()
-            .with_context(|| format!("POST {url} failed"))
-            .and_then(|response| check_response("POST", url, response))?
-            .json()
-            .with_context(|| format!("invalid JSON from {url}"))
-    }
-
-    fn put_json<T>(&self, url: &str, body: &serde_json::Value) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.request_headers(self.http.put(url))?
-            .json(body)
-            .send()
-            .with_context(|| format!("PUT {url} failed"))
-            .and_then(|response| check_response("PUT", url, response))?
-            .json()
-            .with_context(|| format!("invalid JSON from {url}"))
-    }
-
-    fn patch_json<T>(&self, url: &str, body: &serde_json::Value) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.request_headers(self.http.patch(url))?
-            .json(body)
-            .send()
-            .with_context(|| format!("PATCH {url} failed"))
-            .and_then(|response| check_response("PATCH", url, response))?
-            .json()
-            .with_context(|| format!("invalid JSON from {url}"))
-    }
+    json_method!(post_json, post, "POST");
+    json_method!(patch_json, patch, "PATCH");
 
     fn get(&self, url: &str) -> Result<Response> {
         self.request_headers(self.http.get(url))?
@@ -636,6 +760,111 @@ fn check_response(method: &str, url: &str, response: Response) -> Result<Respons
     bail!("{method} {url} returned {status}: {body}");
 }
 
+struct GitlabApiClient {
+    rest_url: Url,
+    token: String,
+    http: Client,
+}
+
+impl GitlabApiClient {
+    fn new(api_base: String, token: String, http: Client) -> Result<Self> {
+        let rest_url = Url::parse(&format!("{}/", api_base.trim_end_matches('/')))
+            .context("invalid GitLab API base URL")?;
+        Ok(Self {
+            rest_url,
+            token,
+            http,
+        })
+    }
+}
+
+impl api::RestClient for GitlabApiClient {
+    type Error = GitlabClientError;
+
+    fn rest_endpoint(
+        &self,
+        endpoint: &str,
+    ) -> std::result::Result<Url, api::ApiError<Self::Error>> {
+        Ok(self.rest_url.join(endpoint)?)
+    }
+}
+
+impl api::Client for GitlabApiClient {
+    fn rest(
+        &self,
+        request: http::request::Builder,
+        body: Vec<u8>,
+    ) -> std::result::Result<http::Response<Bytes>, api::ApiError<Self::Error>> {
+        self.rest_request(request, body)
+            .map_err(api::ApiError::client)
+    }
+}
+
+impl GitlabApiClient {
+    fn rest_request(
+        &self,
+        request: http::request::Builder,
+        body: Vec<u8>,
+    ) -> std::result::Result<http::Response<Bytes>, GitlabClientError> {
+        let request = request
+            .header(
+                "PRIVATE-TOKEN",
+                HeaderValue::from_str(&self.token)
+                    .map_err(GitlabClientError::InvalidHeaderValue)?,
+            )
+            .body(body)
+            .map_err(GitlabClientError::Http)?;
+        let (parts, body) = request.into_parts();
+        let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+            .map_err(GitlabClientError::InvalidMethod)?;
+        let mut builder = self.http.request(method, parts.uri.to_string());
+        for (name, value) in &parts.headers {
+            builder = builder.header(name.as_str(), value.as_bytes());
+        }
+        let response = builder
+            .body(body)
+            .send()
+            .map_err(GitlabClientError::Reqwest)?;
+        let mut output = http::Response::builder().status(response.status());
+        for (name, value) in response.headers() {
+            output = output.header(name.as_str(), value.as_bytes());
+        }
+        output
+            .body(response.bytes().map_err(GitlabClientError::Reqwest)?)
+            .map_err(GitlabClientError::Http)
+    }
+}
+
+#[derive(Debug)]
+enum GitlabClientError {
+    Reqwest(reqwest::Error),
+    Http(http::Error),
+    InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
+    InvalidMethod(http::method::InvalidMethod),
+}
+
+impl fmt::Display for GitlabClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reqwest(error) => write!(formatter, "communication with GitLab: {error}"),
+            Self::Http(error) => write!(formatter, "HTTP request error: {error}"),
+            Self::InvalidHeaderValue(error) => {
+                write!(formatter, "invalid GitLab token header: {error}")
+            }
+            Self::InvalidMethod(error) => write!(formatter, "invalid GitLab HTTP method: {error}"),
+        }
+    }
+}
+
+impl Error for GitlabClientError {}
+
+fn gitlab_visibility(visibility: &Visibility) -> gitlab::api::common::VisibilityLevel {
+    match visibility {
+        Visibility::Private => gitlab::api::common::VisibilityLevel::Private,
+        Visibility::Public => gitlab::api::common::VisibilityLevel::Public,
+    }
+}
+
 fn next_link(headers: &HeaderMap) -> Option<String> {
     let header = headers.get("link")?.to_str().ok()?;
     for part in header.split(',') {
@@ -650,10 +879,6 @@ fn next_link(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
-}
-
-fn urlencoding(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 #[derive(Deserialize)]
@@ -818,11 +1043,6 @@ mod tests {
     }
 
     #[test]
-    fn group_paths_are_url_encoded_for_gitlab() {
-        assert_eq!(urlencoding("parent/child group"), "parent%2Fchild+group");
-    }
-
-    #[test]
     fn validate_token_checks_user_endpoint_with_provider_auth_header() {
         let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
             assert!(request.starts_with("GET /user "), "request was {request}");
@@ -848,7 +1068,7 @@ mod tests {
     #[test]
     fn validate_token_reports_provider_rejection() {
         let (api_url, handle) = one_request_server("401 Unauthorized", "bad token", |request| {
-            assert!(request.starts_with("GET /user "), "request was {request}");
+            assert!(request.starts_with("GET /user"), "request was {request}");
             assert!(
                 request
                     .to_ascii_lowercase()
@@ -866,7 +1086,7 @@ mod tests {
             .validate_token()
             .unwrap_err()
             .to_string();
-        assert!(err.contains("401 Unauthorized"));
+        assert!(err.contains("401") || err.contains("Unauthorized"));
         handle.join().unwrap();
     }
 
