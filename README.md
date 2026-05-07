@@ -1,6 +1,6 @@
 # git-sync
 
-`git-sync` mirrors repositories between Git hosting providers when you run it. It does not install daemons, webhooks, timers, or cron jobs.
+`git-sync` mirrors repositories between Git hosting providers when you run it. It can run as a one-shot sync command, or as a webhook receiver that triggers one-repo syncs after push events.
 
 Supported providers:
 
@@ -22,19 +22,13 @@ The binary will be at `target/release/git-sync`.
 
 ## Configure
 
-Create the config file:
+Run the interactive configuration wizard:
 
 ```sh
-git-sync config init
+git-sync config
 ```
 
-Or use the interactive wizard, which can create or update the same config file:
-
-```sh
-git-sync config wizard
-```
-
-The wizard asks for profile or organization URLs, reuses existing credentials when it can, asks for a PAT only when needed, and then shows the sync group before asking whether to add another group.
+The wizard creates or updates the config file. It asks for profile or organization URLs, reuses existing credentials when it can, asks for a PAT only when needed, then offers webhook setup. Webhooks are strongly recommended because they sync soon after pushes and greatly reduce the chance of divergent histories.
 
 Example wizard flow:
 
@@ -44,6 +38,7 @@ Example wizard flow:
 4. Pick the provider if the instance cannot be detected.
 5. Paste a PAT if needed.
 6. Optionally add a third endpoint for 3-way sync.
+7. Enable webhooks and enter the public webhook URL.
 
 PAT quick setup:
 
@@ -52,23 +47,7 @@ PAT quick setup:
 - Gitea: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 - Forgejo: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 
-Add sites. Prefer `--token-env` so PATs do not live in shell history or the config file.
-
-```sh
-git-sync config site add \
-  --name github \
-  --provider github \
-  --base-url https://github.com \
-  --token-env GITHUB_TOKEN
-
-git-sync config site add \
-  --name gitea \
-  --provider gitea \
-  --base-url https://gitea.example.com \
-  --token-env GITEA_TOKEN
-```
-
-For self-hosted providers, `--base-url` is the web root. API URLs default to:
+There are no separate configuration mutation commands. If you do not want to use the wizard, edit the config TOML directly; see the example config below. For self-hosted providers, `base_url` is the web root. API URLs default to:
 
 - GitHub.com: `https://api.github.com`
 - GitHub Enterprise: `<base-url>/api/v3`
@@ -76,27 +55,7 @@ For self-hosted providers, `--base-url` is the web root. API URLs default to:
 - Gitea: `<base-url>/api/v1`
 - Forgejo: `<base-url>/api/v1`
 
-Override with `--api-url` if your instance is different.
-
-Add one or more mirror groups. Endpoints use `SITE:KIND:NAMESPACE`, where kind is `user`, `org`, or `group` depending on the provider.
-
-```sh
-git-sync config mirror add \
-  --name personal \
-  --endpoint github:user:hykilpikonna \
-  --endpoint gitea:user:azalea
-
-git-sync config mirror add \
-  --name mewolab \
-  --endpoint github:org:MewoLab \
-  --endpoint gitea:org:MewoLab
-```
-
-You can inspect the generated config with:
-
-```sh
-git-sync config show
-```
+Set `api_url` in the TOML if your instance is different.
 
 ## Sync
 
@@ -145,6 +104,72 @@ Use cron or another scheduler for automatic execution:
 ```cron
 */15 * * * * GITHUB_TOKEN=... GITEA_TOKEN=... /path/to/git-sync sync
 ```
+
+## Webhooks
+
+Webhook mode reduces the window for divergent commits by syncing a repository immediately after a provider sends a push event. It is still conservative: if two endpoints receive independent commits before webhook sync catches up, the normal divergence rules still apply.
+
+The interactive wizard can configure webhooks for you. It asks for the public URL, checks that the URL is reachable from the current machine, creates a webhook secret, and can enable periodic full syncs while `git-sync serve` is running.
+
+Example config:
+
+```toml
+[webhook]
+install = true
+url = "https://mirror.example.com/webhook"
+secret = { value = "generated-secret" }
+full_sync_interval_minutes = 60
+reachability_check_interval_minutes = 15
+```
+
+Start the receiver:
+
+```sh
+git-sync serve \
+  --listen 127.0.0.1:8787
+```
+
+Expose that listener with your reverse proxy or tunnel, then install repository webhooks. If `[webhook]` is configured, the URL and secret can come from config:
+
+```sh
+git-sync webhook install
+```
+
+You can also pass them explicitly:
+
+```sh
+git-sync webhook install \
+  --url https://mirror.example.com/webhook \
+  --secret-env GIT_SYNC_WEBHOOK_SECRET
+```
+
+Useful install filters:
+
+```sh
+git-sync webhook install \
+  --url https://mirror.example.com/webhook \
+  --secret-env GIT_SYNC_WEBHOOK_SECRET \
+  --group personal \
+  --repo-pattern '^important-'
+```
+
+The receiver accepts `POST /` and `POST /webhook`. It verifies GitHub/Gitea HMAC SHA-256 signatures and GitLab webhook tokens, then queues `git-sync sync --group <group> --repo-pattern '^<repo>$'` internally. Duplicate events for the same group/repo are coalesced while a job is queued or running. Sync jobs are serialized inside the receiver so the local ref and failure caches stay consistent.
+
+When `[webhook].install = true`, normal `git-sync sync` also checks webhook installation status and installs missing webhooks for repositories that have not been recorded yet. Installation status is stored in `webhook-state.toml` under the work directory.
+
+To uninstall webhooks previously installed by `git-sync`:
+
+```sh
+git-sync webhook uninstall
+```
+
+Serve can also run periodic full syncs. The interval can be configured in `[webhook].full_sync_interval_minutes` or overridden at startup:
+
+```sh
+git-sync serve --full-sync-interval-minutes 30
+```
+
+If `[webhook].reachability_check_interval_minutes` is configured, `serve` periodically checks that the public webhook URL is still reachable and logs a warning when it is not.
 
 ## Sync Semantics
 

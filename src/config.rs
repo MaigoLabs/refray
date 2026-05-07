@@ -13,6 +13,8 @@ pub struct Config {
     pub sites: Vec<SiteConfig>,
     #[serde(default)]
     pub mirrors: Vec<MirrorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,6 +55,18 @@ pub struct MirrorConfig {
     pub visibility: Visibility,
     #[serde(default)]
     pub allow_force: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WebhookConfig {
+    #[serde(default = "default_true")]
+    pub install: bool,
+    pub url: String,
+    pub secret: TokenConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_sync_interval_minutes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability_check_interval_minutes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -127,23 +141,6 @@ impl Config {
         }
     }
 
-    pub fn remove_site(&mut self, name: &str) -> Result<()> {
-        if !self.sites.iter().any(|site| site.name == name) {
-            bail!("site '{name}' does not exist");
-        }
-        for mirror in &self.mirrors {
-            if mirror
-                .endpoints
-                .iter()
-                .any(|endpoint| endpoint.site == name)
-            {
-                bail!("site '{name}' is still used by mirror '{}'", mirror.name);
-            }
-        }
-        self.sites.retain(|site| site.name != name);
-        Ok(())
-    }
-
     pub fn upsert_mirror(&mut self, mirror: MirrorConfig) {
         if let Some(existing) = self
             .mirrors
@@ -168,12 +165,7 @@ impl Config {
 
 impl SiteConfig {
     pub fn token(&self) -> Result<String> {
-        match &self.token {
-            TokenConfig::Value(value) => Ok(value.clone()),
-            TokenConfig::Env(name) => {
-                env::var(name).with_context(|| format!("environment variable {name} is not set"))
-            }
-        }
+        self.token.value("site token")
     }
 
     pub fn api_base(&self) -> String {
@@ -192,6 +184,22 @@ impl SiteConfig {
             ProviderKind::Gitlab => format!("{}/api/v4", trim_end(&self.base_url)),
             ProviderKind::Gitea => format!("{}/api/v1", trim_end(&self.base_url)),
             ProviderKind::Forgejo => format!("{}/api/v1", trim_end(&self.base_url)),
+        }
+    }
+}
+
+impl WebhookConfig {
+    pub fn secret(&self) -> Result<String> {
+        self.secret.value("webhook secret")
+    }
+}
+
+impl TokenConfig {
+    pub fn value(&self, label: &str) -> Result<String> {
+        match self {
+            TokenConfig::Value(value) => Ok(value.clone()),
+            TokenConfig::Env(name) => env::var(name)
+                .with_context(|| format!("environment variable {name} for {label} is not set")),
         }
     }
 }
@@ -267,6 +275,13 @@ mod tests {
     fn parses_token_forms() {
         let config: Config = toml::from_str(
             r#"
+            [webhook]
+            install = true
+            url = "https://mirror.example.test/webhook"
+            secret = { env = "WEBHOOK_SECRET" }
+            full_sync_interval_minutes = 60
+            reachability_check_interval_minutes = 15
+
             [[sites]]
             name = "github"
             provider = "github"
@@ -294,6 +309,14 @@ mod tests {
 
         assert_eq!(config.sites.len(), 1);
         assert_eq!(config.mirrors[0].endpoints.len(), 2);
+        let webhook = config.webhook.unwrap();
+        assert!(webhook.install);
+        assert_eq!(webhook.url, "https://mirror.example.test/webhook");
+        assert_eq!(
+            webhook.secret,
+            TokenConfig::Env("WEBHOOK_SECRET".to_string())
+        );
+        assert_eq!(webhook.full_sync_interval_minutes, Some(60));
     }
 
     #[test]
@@ -311,6 +334,7 @@ mod tests {
                 visibility: Visibility::Private,
                 allow_force: false,
             }],
+            webhook: None,
         };
         let err = validate_config(&config).unwrap_err().to_string();
         assert!(err.contains("at least two endpoints"));
@@ -335,41 +359,10 @@ mod tests {
                 visibility: Visibility::Private,
                 allow_force: false,
             }],
+            webhook: None,
         };
         let err = validate_config(&config).unwrap_err().to_string();
         assert!(err.contains("unknown site 'missing'"));
-    }
-
-    #[test]
-    fn removing_referenced_site_is_rejected() {
-        let mut config = Config {
-            sites: vec![
-                site("github", ProviderKind::Github),
-                site("gitea", ProviderKind::Gitea),
-            ],
-            mirrors: vec![MirrorConfig {
-                name: "personal".to_string(),
-                endpoints: vec![
-                    EndpointConfig {
-                        site: "github".to_string(),
-                        kind: NamespaceKind::User,
-                        namespace: "alice".to_string(),
-                    },
-                    EndpointConfig {
-                        site: "gitea".to_string(),
-                        kind: NamespaceKind::User,
-                        namespace: "alice".to_string(),
-                    },
-                ],
-                create_missing: true,
-                visibility: Visibility::Private,
-                allow_force: false,
-            }],
-        };
-
-        let err = config.remove_site("github").unwrap_err().to_string();
-        assert!(err.contains("still used by mirror 'personal'"));
-        assert!(config.site("github").is_some());
     }
 
     #[test]

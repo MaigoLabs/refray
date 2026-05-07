@@ -1,6 +1,8 @@
 use std::fmt::Display;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use console::{Term, style};
@@ -15,9 +17,10 @@ use std::io::{BufRead, Write};
 
 use crate::config::{
     Config, EndpointConfig, MirrorConfig, NamespaceKind, ProviderKind, SiteConfig, TokenConfig,
-    Visibility,
+    Visibility, WebhookConfig,
 };
 use crate::provider::ProviderClient;
+use crate::webhook::check_webhook_url_reachable;
 
 #[derive(Clone, Debug)]
 struct ProfileTarget {
@@ -120,7 +123,86 @@ fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<(
         visibility: Visibility::Private,
         allow_force: false,
     });
+    prompt_webhook_setup_styled(config, theme)?;
 
+    Ok(())
+}
+
+fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<()> {
+    if config
+        .webhook
+        .as_ref()
+        .is_some_and(|webhook| webhook.install)
+    {
+        println!(
+            "{} {}",
+            style("Webhooks").green().bold(),
+            style("already enabled").dim()
+        );
+        return Ok(());
+    }
+    println!();
+    println!(
+        "{} {}",
+        style("Webhooks").cyan().bold(),
+        style(
+            "strongly recommended; they sync immediately after pushes and greatly reduce conflicts"
+        )
+        .dim()
+    );
+    if !Confirm::with_theme(theme)
+        .with_prompt("Install webhooks for configured repositories?")
+        .default(true)
+        .interact()?
+    {
+        return Ok(());
+    }
+    let url = Input::<String>::with_theme(theme)
+        .with_prompt("Webhook URL reachable by GitHub/GitLab/Gitea")
+        .validate_with(|value: &String| validate_url(value))
+        .interact_text()?;
+    match check_webhook_url_reachable(&url) {
+        Ok(()) => println!(
+            "{} {}",
+            style("reachable").green().bold(),
+            style(&url).cyan()
+        ),
+        Err(error) => {
+            println!(
+                "{} {}: {error:#}",
+                style("not reachable from here").yellow().bold(),
+                style(&url).cyan()
+            );
+            if !Confirm::with_theme(theme)
+                .with_prompt("Save this webhook URL anyway?")
+                .default(false)
+                .interact()?
+            {
+                return Ok(());
+            }
+        }
+    }
+    let full_sync_interval_minutes = if Confirm::with_theme(theme)
+        .with_prompt("Run periodic full sync while the webhook server is running?")
+        .default(true)
+        .interact()?
+    {
+        Some(
+            Input::<u64>::with_theme(theme)
+                .with_prompt("Full sync interval in minutes")
+                .default(60)
+                .interact_text()?,
+        )
+    } else {
+        None
+    };
+    config.webhook = Some(WebhookConfig {
+        install: true,
+        url,
+        secret: TokenConfig::Value(generate_webhook_secret()),
+        full_sync_interval_minutes,
+        reachability_check_interval_minutes: Some(15),
+    });
     Ok(())
 }
 
@@ -549,6 +631,56 @@ where
         create_missing: true,
         visibility: Visibility::Private,
         allow_force: false,
+    });
+    prompt_webhook_setup(reader, writer, config)?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn prompt_webhook_setup<R, W>(reader: &mut R, writer: &mut W, config: &mut Config) -> Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    if config
+        .webhook
+        .as_ref()
+        .is_some_and(|webhook| webhook.install)
+    {
+        writeln!(writer, "Webhooks already enabled.")?;
+        return Ok(());
+    }
+    writeln!(
+        writer,
+        "Install webhooks? Strongly recommended because immediate sync greatly reduces conflicts."
+    )?;
+    if !prompt_bool(reader, writer, "Install webhook?", true)? {
+        return Ok(());
+    }
+    let url = prompt_required(reader, writer, "Webhook URL reachable by providers")?;
+    if let Err(error) = validate_url(&url) {
+        bail!(error);
+    }
+    let full_sync_interval_minutes = if prompt_bool(
+        reader,
+        writer,
+        "Run periodic full sync while serve is running?",
+        true,
+    )? {
+        Some(
+            prompt_with_default(reader, writer, "Full sync interval in minutes", "60")?
+                .parse::<u64>()
+                .context("full sync interval must be a number")?,
+        )
+    } else {
+        None
+    };
+    config.webhook = Some(WebhookConfig {
+        install: true,
+        url,
+        secret: TokenConfig::Value("test-webhook-secret".to_string()),
+        full_sync_interval_minutes,
+        reachability_check_interval_minutes: Some(15),
     });
     Ok(())
 }
@@ -1128,6 +1260,36 @@ fn validate_required(value: &str) -> std::result::Result<(), String> {
     }
 }
 
+fn validate_url(value: &str) -> std::result::Result<(), String> {
+    validate_required(value)?;
+    let url = Url::parse(value).map_err(|error| format!("Invalid URL: {error}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err("URL must start with http:// or https://".to_string()),
+    }
+}
+
+fn generate_webhook_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    if File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .is_err()
+    {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = ((nanos >> ((index % 16) * 8)) & 0xff) as u8;
+        }
+    }
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1142,6 +1304,7 @@ mod tests {
             "https://gitea.example.test/azalea",
             "gt-token",
             "",
+            "n",
             "n",
             "3",
         ]
@@ -1198,6 +1361,7 @@ mod tests {
             "gt-token",
             "",
             "n",
+            "n",
             "3",
         ]
         .join("\n")
@@ -1214,6 +1378,41 @@ mod tests {
     }
 
     #[test]
+    fn wizard_can_enable_webhooks() {
+        let input = [
+            "https://github.com/alice",
+            "gh-token",
+            "",
+            "https://gitea.example.test/alice",
+            "gt-token",
+            "",
+            "n",
+            "y",
+            "https://mirror.example.test/webhook",
+            "y",
+            "30",
+            "3",
+        ]
+        .join("\n")
+            + "\n";
+        let mut reader = Cursor::new(input.as_bytes());
+        let mut output = Vec::new();
+
+        let config =
+            run_config_wizard_with_io(Config::default(), &mut reader, &mut output).unwrap();
+
+        let webhook = config.webhook.unwrap();
+        assert!(webhook.install);
+        assert_eq!(webhook.url, "https://mirror.example.test/webhook");
+        assert_eq!(webhook.full_sync_interval_minutes, Some(30));
+        assert_eq!(webhook.reachability_check_interval_minutes, Some(15));
+        assert_eq!(
+            webhook.secret,
+            TokenConfig::Value("test-webhook-secret".to_string())
+        );
+    }
+
+    #[test]
     fn wizard_reuses_existing_credentials_for_same_instance() {
         let config = Config {
             sites: vec![SiteConfig {
@@ -1225,12 +1424,14 @@ mod tests {
                 git_username: None,
             }],
             mirrors: Vec::new(),
+            webhook: None,
         };
         let input = [
             "https://github.com/alice",
             "",
             "https://github.com/bob",
             "",
+            "n",
             "n",
             "3",
         ]
@@ -1285,6 +1486,7 @@ mod tests {
                 visibility: Visibility::Private,
                 allow_force: false,
             }],
+            webhook: None,
         };
         let mut reader = Cursor::new(b"3\n".as_slice());
         let mut output = Vec::new();
@@ -1337,6 +1539,7 @@ mod tests {
                 visibility: Visibility::Private,
                 allow_force: false,
             }],
+            webhook: None,
         };
         let input = ["2", "1", "3"].join("\n") + "\n";
         let mut reader = Cursor::new(input.as_bytes());
@@ -1391,6 +1594,7 @@ mod tests {
                 visibility: Visibility::Private,
                 allow_force: false,
             }],
+            webhook: None,
         };
         let input = ["2", "2", "3"].join("\n") + "\n";
         let mut reader = Cursor::new(input.as_bytes());
