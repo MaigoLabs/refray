@@ -16,8 +16,8 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::{Config, default_config_path};
 use crate::sync::{DEFAULT_JOBS, SyncOptions, sync_all};
 use crate::webhook::{
-    ServeOptions, WebhookInstallOptions, WebhookUninstallOptions, install_webhooks, serve,
-    uninstall_webhooks,
+    ServeOptions, WebhookInstallOptions, WebhookUninstallOptions, WebhookUpdateOptions,
+    install_webhooks, serve, uninstall_webhooks, update_webhooks,
 };
 
 #[derive(Parser, Debug)]
@@ -84,10 +84,13 @@ struct ServeCommand {
 enum WebhookCommand {
     Install(WebhookInstallCommand),
     Uninstall(WebhookUninstallCommand),
+    Update(WebhookUpdateCommand),
 }
 
 #[derive(Args, Debug)]
 struct WebhookInstallCommand {
+    #[arg(value_name = "REPO", conflicts_with = "repo_pattern")]
+    repo: Option<String>,
     #[arg(long, value_name = "URL")]
     url: Option<String>,
     #[arg(long, conflicts_with = "secret_env")]
@@ -108,8 +111,28 @@ struct WebhookInstallCommand {
 
 #[derive(Args, Debug)]
 struct WebhookUninstallCommand {
+    #[arg(value_name = "REPO")]
+    repo: Option<String>,
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
     #[arg(long, value_name = "NAME")]
     group: Option<String>,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long, value_name = "PATH")]
+    work_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
+    jobs: usize,
+}
+
+#[derive(Args, Debug)]
+struct WebhookUpdateCommand {
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long, conflicts_with = "secret_env")]
+    secret: Option<String>,
+    #[arg(long, value_name = "ENV", conflicts_with = "secret")]
+    secret_env: Option<String>,
     #[arg(long)]
     dry_run: bool,
     #[arg(long, value_name = "PATH")]
@@ -177,6 +200,7 @@ fn main() -> Result<()> {
                     url,
                     secret,
                     group: command.group,
+                    repo: command.repo,
                     repo_pattern: command.repo_pattern,
                     dry_run: command.dry_run,
                     work_dir: command.work_dir,
@@ -186,15 +210,45 @@ fn main() -> Result<()> {
         }
         Command::Webhook(WebhookCommand::Uninstall(command)) => {
             let config = load_config(&config_path)?;
+            let url = resolve_webhook_url(&config, command.url)?;
             uninstall_webhooks(
                 &config,
                 WebhookUninstallOptions {
+                    url,
                     group: command.group,
+                    repo: command.repo,
                     dry_run: command.dry_run,
                     work_dir: command.work_dir,
                     jobs: command.jobs,
                 },
             )
+        }
+        Command::Webhook(WebhookCommand::Update(command)) => {
+            let mut config = load_config(&config_path)?;
+            let old_url = config
+                .webhook
+                .as_ref()
+                .map(|webhook| webhook.url.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("configure [webhook] before running webhook update")
+                })?;
+            let secret = resolve_webhook_secret(&config, command.secret, command.secret_env)?;
+            update_webhooks(
+                &config,
+                WebhookUpdateOptions {
+                    old_url,
+                    new_url: command.url.clone(),
+                    secret,
+                    dry_run: command.dry_run,
+                    work_dir: command.work_dir,
+                    jobs: command.jobs,
+                },
+            )?;
+            if !command.dry_run {
+                set_config_webhook_url(&mut config, command.url);
+                config.save(&config_path)?;
+            }
+            Ok(())
         }
     }
 }
@@ -226,6 +280,13 @@ fn resolve_webhook_url(config: &Config, value: Option<String>) -> Result<String>
     value
         .or_else(|| config.webhook.as_ref().map(|webhook| webhook.url.clone()))
         .ok_or_else(|| anyhow::anyhow!("pass --url or configure [webhook].url"))
+}
+
+fn set_config_webhook_url(config: &mut Config, url: String) {
+    let Some(webhook) = &mut config.webhook else {
+        unreachable!("caller verifies webhook config exists before saving update")
+    };
+    webhook.url = url;
 }
 
 #[cfg(test)]
