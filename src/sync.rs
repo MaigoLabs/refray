@@ -169,6 +169,7 @@ fn sync_group(
             mirror,
             &all_endpoint_repos,
             context.work_dir,
+            context.options.jobs,
         )?;
     }
 
@@ -331,7 +332,13 @@ fn sync_group(
 
     if create_missing && !context.options.dry_run {
         let repos = list_group_repos(context.config, mirror)?;
-        webhook::ensure_configured_webhooks(context.config, mirror, &repos, context.work_dir)?;
+        webhook::ensure_configured_webhooks(
+            context.config,
+            mirror,
+            &repos,
+            context.work_dir,
+            context.options.jobs,
+        )?;
     }
 
     Ok(failures)
