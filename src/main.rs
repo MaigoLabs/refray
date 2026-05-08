@@ -102,6 +102,8 @@ struct WebhookInstallCommand {
     dry_run: bool,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
+    jobs: usize,
 }
 
 #[derive(Args, Debug)]
@@ -112,6 +114,8 @@ struct WebhookUninstallCommand {
     dry_run: bool,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
+    jobs: usize,
 }
 
 fn main() -> Result<()> {
@@ -176,6 +180,7 @@ fn main() -> Result<()> {
                     repo_pattern: command.repo_pattern,
                     dry_run: command.dry_run,
                     work_dir: command.work_dir,
+                    jobs: command.jobs,
                 },
             )
         }
@@ -187,6 +192,7 @@ fn main() -> Result<()> {
                     group: command.group,
                     dry_run: command.dry_run,
                     work_dir: command.work_dir,
+                    jobs: command.jobs,
                 },
             )
         }

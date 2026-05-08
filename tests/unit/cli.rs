@@ -97,6 +97,8 @@ fn cli_accepts_webhook_install() {
         "sync-1",
         "--repo-pattern",
         "^repo$",
+        "--jobs",
+        "6",
     ])
     .unwrap();
 
@@ -110,6 +112,7 @@ fn cli_accepts_webhook_install() {
     assert_eq!(args.secret, Some("secret".to_string()));
     assert_eq!(args.group, Some("sync-1".to_string()));
     assert_eq!(args.repo_pattern, Some("^repo$".to_string()));
+    assert_eq!(args.jobs, 6);
 }
 
 #[test]
@@ -121,6 +124,8 @@ fn cli_accepts_webhook_uninstall() {
         "--group",
         "sync-1",
         "--dry-run",
+        "--jobs",
+        "3",
     ])
     .unwrap();
 
@@ -129,4 +134,5 @@ fn cli_accepts_webhook_uninstall() {
     };
     assert_eq!(args.group, Some("sync-1".to_string()));
     assert!(args.dry_run);
+    assert_eq!(args.jobs, 3);
 }

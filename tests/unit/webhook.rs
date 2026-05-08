@@ -2,6 +2,9 @@ use super::*;
 use crate::config::{
     EndpointConfig, MirrorConfig, NamespaceKind, SiteConfig, TokenConfig, Visibility,
 };
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
 
 #[test]
 fn verifies_github_hmac_signature() {
@@ -150,6 +153,60 @@ fn webhook_state_persists_installations() {
     );
 }
 
+#[test]
+fn blocked_webhook_install_is_skipped_and_recorded() {
+    let (api_url, handle) = one_request_server(
+        "403 Forbidden",
+        r#"{"message":"Repository access blocked","block":{"html_url":"https://github.com/tos"}}"#,
+        |request| assert!(request.starts_with("GET /repos/alice/repo/hooks ")),
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site("github", ProviderKind::Github)
+    };
+    let state = Arc::new(Mutex::new(WebhookState::default()));
+
+    install_webhook_task(
+        WebhookInstallTask {
+            site,
+            group: "sync-1".to_string(),
+            endpoint: endpoint("github", NamespaceKind::User, "alice"),
+            repo: RemoteRepo {
+                name: "repo".to_string(),
+                clone_url: "https://github.com/alice/repo.git".to_string(),
+                private: true,
+                description: None,
+            },
+            url: "https://mirror.example.test/webhook".to_string(),
+            secret: "secret".to_string(),
+            dry_run: false,
+        },
+        &state,
+    )
+    .unwrap();
+
+    let state = state.lock().unwrap();
+    assert!(state.installations.is_empty());
+    assert_eq!(state.skipped.len(), 1);
+    assert_eq!(
+        state.skipped.values().next().unwrap().reason,
+        "provider blocked access"
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn archived_webhook_failure_is_non_actionable() {
+    let error = anyhow::anyhow!(
+        "POST https://api.github.com/repos/acme/repo/hooks returned 403 Forbidden: Repository was archived so is read-only."
+    );
+
+    assert_eq!(
+        non_actionable_webhook_failure_reason(&error).as_deref(),
+        Some("repository is archived/read-only")
+    );
+}
+
 fn site(name: &str, provider: ProviderKind) -> SiteConfig {
     SiteConfig {
         name: name.to_string(),
@@ -167,4 +224,31 @@ fn endpoint(site: &str, kind: NamespaceKind, namespace: &str) -> EndpointConfig 
         kind,
         namespace: namespace.to_string(),
     }
+}
+
+fn one_request_server<F>(
+    status: &'static str,
+    body: &'static str,
+    assert_request: F,
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(&str) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 4096];
+        let bytes = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+        assert_request(&request);
+
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    (format!("http://{address}"), handle)
 }
