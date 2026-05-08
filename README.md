@@ -204,8 +204,17 @@ Branch conflict handling is intentionally conservative:
 
 - If all endpoints agree on a branch tip, that tip is pushed everywhere.
 - If one branch tip is a descendant of the others, the descendant wins and is pushed everywhere.
-- If branch tips diverged, that branch is skipped and reported.
+- If branch tips diverged, `conflict_resolution` controls what happens.
 - If `allow_force = true` or `git-sync sync --force` is used, a diverged branch chooses the newest commit timestamp and force-pushes it.
+
+Conflict resolution strategies are configured per mirror group:
+
+- `fail`: fail the repository sync when branch tips diverge.
+- `auto_rebase`: rebase divergent commits in endpoint order into one branch history, push fast-forward updates normally, and force-push only endpoints whose original tip was rewritten. If rebase hits a file conflict, fail.
+- `pull_request`: push temporary `git-sync/conflicts/...` branches and open provider pull requests/merge requests so a person can resolve the divergence.
+- `auto_rebase_pull_request`: try `auto_rebase` first, then fall back to pull requests if rebase hits a conflict.
+
+When a previously opened conflict pull request is merged, the next sync sees the merged branch as the winning tip, pushes it to the other endpoints, and closes stale `git-sync/conflicts/...` pull requests for that branch.
 
 Branch deletion is propagated only when it is safe to infer intent. If a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `git-sync` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
 
@@ -231,6 +240,7 @@ name = "personal"
 create_missing = true
 visibility = "private"
 allow_force = false
+conflict_resolution = "auto_rebase_pull_request"
 
 [[mirrors.endpoints]]
 site = "github"

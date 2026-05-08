@@ -47,12 +47,14 @@ where
     W: Write,
 {
     let endpoints = prompt_sync_group_endpoints(reader, writer, config, &[])?;
+    let conflict_resolution = prompt_conflict_resolution(reader, writer, None)?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
         endpoints,
         create_missing: true,
         visibility: Visibility::Private,
         allow_force: false,
+        conflict_resolution,
     });
     prompt_webhook_setup(reader, writer, config)?;
     Ok(())
@@ -249,8 +251,16 @@ where
         match value.parse::<usize>() {
             Ok(index) if (1..=config.mirrors.len()).contains(&index) => {
                 let existing = config.mirrors[index - 1].endpoints.clone();
+                let existing_conflict_resolution =
+                    config.mirrors[index - 1].conflict_resolution.clone();
                 let endpoints = prompt_sync_group_endpoints(reader, writer, config, &existing)?;
+                let conflict_resolution = prompt_conflict_resolution(
+                    reader,
+                    writer,
+                    Some(&existing_conflict_resolution),
+                )?;
                 config.mirrors[index - 1].endpoints = endpoints;
+                config.mirrors[index - 1].conflict_resolution = conflict_resolution;
                 prompt_webhook_setup(reader, writer, config)?;
                 writeln!(writer, "updated sync group {index}")?;
                 return Ok(true);
@@ -405,6 +415,57 @@ where
             "group" => return Ok(NamespaceKind::Group),
             _ => writeln!(writer, "Namespace kind must be user, org, or group.")?,
         }
+    }
+}
+
+fn prompt_conflict_resolution<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    existing: Option<&ConflictResolutionStrategy>,
+) -> Result<ConflictResolutionStrategy>
+where
+    R: BufRead,
+    W: Write,
+{
+    let default = existing
+        .map(conflict_resolution_value)
+        .unwrap_or("auto-rebase + pull-request");
+    loop {
+        writeln!(writer, "How should git-sync resolve branch conflicts?")?;
+        writeln!(writer, "  1. fail")?;
+        writeln!(writer, "  2. auto-rebase and fail on file conflict")?;
+        writeln!(writer, "  3. pull-request")?;
+        writeln!(writer, "  4. auto-rebase + pull-request (recommended)")?;
+        let value = prompt_with_default(reader, writer, "Conflict resolution", default)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "fail" => return Ok(ConflictResolutionStrategy::Fail),
+            "2" | "auto-rebase" | "auto_rebase" | "rebase" => {
+                return Ok(ConflictResolutionStrategy::AutoRebase);
+            }
+            "3" | "pull-request" | "pull_request" | "pr" => {
+                return Ok(ConflictResolutionStrategy::PullRequest);
+            }
+            "4"
+            | "auto-rebase + pull-request"
+            | "auto-rebase+pull-request"
+            | "auto_rebase_pull_request"
+            | "auto-rebase-pull-request" => {
+                return Ok(ConflictResolutionStrategy::AutoRebasePullRequest);
+            }
+            _ => writeln!(
+                writer,
+                "Enter 1, 2, 3, 4, fail, auto-rebase, pull-request, or auto-rebase + pull-request."
+            )?,
+        }
+    }
+}
+
+fn conflict_resolution_value(strategy: &ConflictResolutionStrategy) -> &'static str {
+    match strategy {
+        ConflictResolutionStrategy::Fail => "fail",
+        ConflictResolutionStrategy::AutoRebase => "auto-rebase",
+        ConflictResolutionStrategy::PullRequest => "pull-request",
+        ConflictResolutionStrategy::AutoRebasePullRequest => "auto-rebase + pull-request",
     }
 }
 

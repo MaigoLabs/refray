@@ -23,6 +23,19 @@ pub struct EndpointRepo {
     pub repo: RemoteRepo,
 }
 
+#[derive(Clone, Debug)]
+pub struct PullRequestRequest {
+    pub title: String,
+    pub body: String,
+    pub head_branch: String,
+    pub base_branch: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestInfo {
+    pub url: Option<String>,
+}
+
 pub struct ProviderClient<'a> {
     site: &'a SiteConfig,
     token: String,
@@ -117,6 +130,33 @@ impl<'a> ProviderClient<'a> {
             github => self.github_uninstall_webhook(endpoint, repo_name, url),
             gitlab => self.gitlab_uninstall_webhook(endpoint, repo_name, url),
             gitea_like => self.gitea_uninstall_webhook(endpoint, repo_name, url),
+        )
+    }
+
+    pub fn open_pull_request(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        request: &PullRequestRequest,
+    ) -> Result<PullRequestInfo> {
+        dispatch_provider!(self.site.provider,
+            github => self.github_open_pull_request(endpoint, repo, request),
+            gitlab => self.gitlab_open_pull_request(endpoint, repo, request),
+            gitea_like => self.gitea_open_pull_request(endpoint, repo, request),
+        )
+    }
+
+    pub fn close_pull_requests_by_head_prefix(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        base_branch: &str,
+        head_prefix: &str,
+    ) -> Result<usize> {
+        dispatch_provider!(self.site.provider,
+            github => self.github_close_pull_requests_by_head_prefix(endpoint, repo, base_branch, head_prefix),
+            gitlab => self.gitlab_close_pull_requests_by_head_prefix(endpoint, repo, base_branch, head_prefix),
+            gitea_like => self.gitea_close_pull_requests_by_head_prefix(endpoint, repo, base_branch, head_prefix),
         )
     }
 
@@ -238,6 +278,74 @@ impl<'a> ProviderClient<'a> {
         self.delete_matching_hook(&hooks_url, url)
     }
 
+    fn github_open_pull_request(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        request: &PullRequestRequest,
+    ) -> Result<PullRequestInfo> {
+        let url = self.repo_pulls_url(endpoint, &repo.name, "GitHub")?;
+        if let Some(existing) =
+            self.github_find_open_pull_request(&url, &request.head_branch, &request.base_branch)?
+        {
+            return Ok(PullRequestInfo {
+                url: existing.url(),
+            });
+        }
+        let body = json!({
+            "title": request.title,
+            "body": request.body,
+            "head": request.head_branch,
+            "base": request.base_branch,
+        });
+        let created: ProviderPullRequest = self.post_json(&url, &body)?;
+        Ok(PullRequestInfo { url: created.url() })
+    }
+
+    fn github_find_open_pull_request(
+        &self,
+        pulls_url: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<Option<ProviderPullRequest>> {
+        let url = format!(
+            "{pulls_url}?state=open&base={}&per_page=100",
+            urlencoding(base_branch)
+        );
+        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        Ok(pulls
+            .into_iter()
+            .find(|pull| pull.head_ref() == Some(head_branch)))
+    }
+
+    fn github_close_pull_requests_by_head_prefix(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        base_branch: &str,
+        head_prefix: &str,
+    ) -> Result<usize> {
+        let pulls_url = self.repo_pulls_url(endpoint, &repo.name, "GitHub")?;
+        let url = format!(
+            "{pulls_url}?state=open&base={}&per_page=100",
+            urlencoding(base_branch)
+        );
+        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        let mut closed = 0;
+        for pull in pulls.into_iter().filter(|pull| {
+            pull.head_ref()
+                .is_some_and(|head| head.starts_with(head_prefix))
+        }) {
+            let Some(number) = pull.number else {
+                continue;
+            };
+            let update_url = format!("{pulls_url}/{number}");
+            self.patch_json::<serde_json::Value>(&update_url, &json!({ "state": "closed" }))?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
     fn gitlab_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
@@ -342,6 +450,75 @@ impl<'a> ProviderClient<'a> {
         self.delete_matching_hook(&hooks_url, url)
     }
 
+    fn gitlab_open_pull_request(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        request: &PullRequestRequest,
+    ) -> Result<PullRequestInfo> {
+        let url = self.gitlab_merge_requests_url(endpoint, &repo.name);
+        if let Some(existing) =
+            self.gitlab_find_open_merge_request(&url, &request.head_branch, &request.base_branch)?
+        {
+            return Ok(PullRequestInfo {
+                url: existing.url(),
+            });
+        }
+        let body = json!({
+            "title": request.title,
+            "description": request.body,
+            "source_branch": request.head_branch,
+            "target_branch": request.base_branch,
+        });
+        let created: ProviderPullRequest = self.post_json(&url, &body)?;
+        Ok(PullRequestInfo { url: created.url() })
+    }
+
+    fn gitlab_find_open_merge_request(
+        &self,
+        merge_requests_url: &str,
+        source_branch: &str,
+        target_branch: &str,
+    ) -> Result<Option<ProviderPullRequest>> {
+        let url = format!(
+            "{merge_requests_url}?state=opened&source_branch={}&target_branch={}&per_page=100",
+            urlencoding(source_branch),
+            urlencoding(target_branch)
+        );
+        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        Ok(pulls
+            .into_iter()
+            .find(|pull| pull.head_ref() == Some(source_branch)))
+    }
+
+    fn gitlab_close_pull_requests_by_head_prefix(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        base_branch: &str,
+        head_prefix: &str,
+    ) -> Result<usize> {
+        let merge_requests_url = self.gitlab_merge_requests_url(endpoint, &repo.name);
+        let url = format!(
+            "{merge_requests_url}?state=opened&target_branch={}&per_page=100",
+            urlencoding(base_branch)
+        );
+        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        let mut closed = 0;
+        for pull in pulls.into_iter().filter(|pull| {
+            pull.head_ref()
+                .is_some_and(|head| head.starts_with(head_prefix))
+        }) {
+            let Some(number) = pull.iid.or(pull.number) else {
+                continue;
+            };
+            let update_url = format!("{merge_requests_url}/{number}");
+            self.put_json::<serde_json::Value>(&update_url, &json!({ "state_event": "close" }))?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
     fn gitea_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
@@ -428,6 +605,75 @@ impl<'a> ProviderClient<'a> {
         self.delete_matching_hook(&hooks_url, url)
     }
 
+    fn gitea_open_pull_request(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        request: &PullRequestRequest,
+    ) -> Result<PullRequestInfo> {
+        let url = self.repo_pulls_url(endpoint, &repo.name, "Gitea/Forgejo")?;
+        if let Some(existing) =
+            self.gitea_find_open_pull_request(&url, &request.head_branch, &request.base_branch)?
+        {
+            return Ok(PullRequestInfo {
+                url: existing.url(),
+            });
+        }
+        let body = json!({
+            "title": request.title,
+            "body": request.body,
+            "head": request.head_branch,
+            "base": request.base_branch,
+        });
+        let created: ProviderPullRequest = self.post_json(&url, &body)?;
+        Ok(PullRequestInfo { url: created.url() })
+    }
+
+    fn gitea_find_open_pull_request(
+        &self,
+        pulls_url: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<Option<ProviderPullRequest>> {
+        let url = format!(
+            "{pulls_url}?state=open&base={}&head={}&limit=50",
+            urlencoding(base_branch),
+            urlencoding(head_branch)
+        );
+        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        Ok(pulls
+            .into_iter()
+            .find(|pull| pull.head_ref() == Some(head_branch)))
+    }
+
+    fn gitea_close_pull_requests_by_head_prefix(
+        &self,
+        endpoint: &EndpointConfig,
+        repo: &RemoteRepo,
+        base_branch: &str,
+        head_prefix: &str,
+    ) -> Result<usize> {
+        let pulls_url = self.repo_pulls_url(endpoint, &repo.name, "Gitea/Forgejo")?;
+        let url = format!(
+            "{pulls_url}?state=open&base={}&limit=50",
+            urlencoding(base_branch)
+        );
+        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        let mut closed = 0;
+        for pull in pulls.into_iter().filter(|pull| {
+            pull.head_ref()
+                .is_some_and(|head| head.starts_with(head_prefix))
+        }) {
+            let Some(number) = pull.number.or(pull.index) else {
+                continue;
+            };
+            let update_url = format!("{pulls_url}/{number}");
+            self.patch_json::<serde_json::Value>(&update_url, &json!({ "state": "closed" }))?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
     fn repo_hooks_url(
         &self,
         endpoint: &EndpointConfig,
@@ -444,10 +690,35 @@ impl<'a> ProviderClient<'a> {
         ))
     }
 
+    fn repo_pulls_url(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        provider: &str,
+    ) -> Result<String> {
+        if matches!(endpoint.kind, NamespaceKind::Group) {
+            bail!("{provider} endpoints use kind 'user' or 'org'");
+        }
+        Ok(format!(
+            "{}/repos/{}/{repo_name}/pulls",
+            self.site.api_base(),
+            endpoint.namespace
+        ))
+    }
+
     fn gitlab_hooks_url(&self, endpoint: &EndpointConfig, repo_name: &str) -> String {
         let project = format!("{}/{repo_name}", endpoint.namespace);
         format!(
             "{}/projects/{}/hooks",
+            self.site.api_base(),
+            urlencoding(&project)
+        )
+    }
+
+    fn gitlab_merge_requests_url(&self, endpoint: &EndpointConfig, repo_name: &str) -> String {
+        let project = format!("{}/{repo_name}", endpoint.namespace);
+        format!(
+            "{}/projects/{}/merge_requests",
             self.site.api_base(),
             urlencoding(&project)
         )
@@ -728,6 +999,43 @@ struct RepoHook {
     url: Option<String>,
     #[serde(default)]
     config: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct ProviderPullRequest {
+    #[serde(default)]
+    number: Option<u64>,
+    #[serde(default)]
+    iid: Option<u64>,
+    #[serde(default)]
+    index: Option<u64>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    web_url: Option<String>,
+    #[serde(default)]
+    head: Option<PullRequestHead>,
+    #[serde(default)]
+    source_branch: Option<String>,
+}
+
+impl ProviderPullRequest {
+    fn url(&self) -> Option<String> {
+        self.html_url.clone().or_else(|| self.web_url.clone())
+    }
+
+    fn head_ref(&self) -> Option<&str> {
+        self.head
+            .as_ref()
+            .map(|head| head.reference.as_str())
+            .or(self.source_branch.as_deref())
+    }
+}
+
+#[derive(Deserialize)]
+struct PullRequestHead {
+    #[serde(rename = "ref")]
+    reference: String,
 }
 
 impl RepoHook {
