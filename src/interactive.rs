@@ -14,8 +14,8 @@ use tiny_http::{Request, Response, Server, StatusCode};
 use url::Url;
 
 use crate::config::{
-    Config, EndpointConfig, MirrorConfig, NamespaceKind, ProviderKind, SiteConfig, TokenConfig,
-    Visibility, WebhookConfig,
+    Config, ConflictResolutionStrategy, EndpointConfig, MirrorConfig, NamespaceKind, ProviderKind,
+    SiteConfig, TokenConfig, Visibility, WebhookConfig,
 };
 use crate::provider::ProviderClient;
 use crate::webhook::check_webhook_url_reachable;
@@ -98,12 +98,14 @@ enum WizardAction {
 
 fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<()> {
     let endpoints = prompt_sync_group_endpoints_styled(config, theme, &[])?;
+    let conflict_resolution = prompt_conflict_resolution_styled(theme, None)?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
         endpoints,
         create_missing: true,
         visibility: Visibility::Private,
         allow_force: false,
+        conflict_resolution,
     });
     prompt_webhook_setup_styled(config, theme)?;
 
@@ -410,8 +412,12 @@ fn edit_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<
         style(format!("sync group {}", index + 1)).cyan()
     );
     let existing = config.mirrors[index].endpoints.clone();
+    let existing_conflict_resolution = config.mirrors[index].conflict_resolution.clone();
     let endpoints = prompt_sync_group_endpoints_styled(config, theme, &existing)?;
+    let conflict_resolution =
+        prompt_conflict_resolution_styled(theme, Some(&existing_conflict_resolution))?;
     config.mirrors[index].endpoints = endpoints;
+    config.mirrors[index].conflict_resolution = conflict_resolution;
     prompt_webhook_setup_styled(config, theme)?;
     println!(
         "{} {}",
@@ -688,6 +694,43 @@ fn prompt_namespace_kind_styled(theme: &ColorfulTheme, namespace: &str) -> Resul
     })
 }
 
+fn prompt_conflict_resolution_styled(
+    theme: &ColorfulTheme,
+    existing: Option<&ConflictResolutionStrategy>,
+) -> Result<ConflictResolutionStrategy> {
+    let options = [
+        "Fail",
+        "Auto-rebase; fail on file conflict",
+        "Pull request",
+        "Auto-rebase; pull request on file conflict (recommended)",
+    ];
+    let default = existing.map(conflict_resolution_index).unwrap_or(3);
+    let index = Select::with_theme(theme)
+        .with_prompt("How should git-sync resolve branch conflicts?")
+        .items(options)
+        .default(default)
+        .interact()?;
+    Ok(conflict_resolution_from_index(index))
+}
+
+fn conflict_resolution_index(strategy: &ConflictResolutionStrategy) -> usize {
+    match strategy {
+        ConflictResolutionStrategy::Fail => 0,
+        ConflictResolutionStrategy::AutoRebase => 1,
+        ConflictResolutionStrategy::PullRequest => 2,
+        ConflictResolutionStrategy::AutoRebasePullRequest => 3,
+    }
+}
+
+fn conflict_resolution_from_index(index: usize) -> ConflictResolutionStrategy {
+    match index {
+        0 => ConflictResolutionStrategy::Fail,
+        1 => ConflictResolutionStrategy::AutoRebase,
+        2 => ConflictResolutionStrategy::PullRequest,
+        _ => ConflictResolutionStrategy::AutoRebasePullRequest,
+    }
+}
+
 fn print_sync_groups(config: &Config) {
     println!();
     println!("{}", style("Sync groups").cyan().bold());
@@ -725,7 +768,7 @@ fn sync_group_summaries(config: &Config) -> Vec<String> {
 }
 
 fn sync_group_summary(config: &Config, mirror: &MirrorConfig) -> String {
-    mirror
+    let endpoints = mirror
         .endpoints
         .iter()
         .map(|endpoint| {
@@ -735,7 +778,23 @@ fn sync_group_summary(config: &Config, mirror: &MirrorConfig) -> String {
                 .unwrap_or_else(|| format!("{}:{}", endpoint.site, endpoint.namespace))
         })
         .collect::<Vec<_>>()
-        .join(" <-> ")
+        .join(" <-> ");
+    format!(
+        "{} ({})",
+        endpoints,
+        conflict_resolution_label(&mirror.conflict_resolution)
+    )
+}
+
+fn conflict_resolution_label(strategy: &ConflictResolutionStrategy) -> &'static str {
+    match strategy {
+        ConflictResolutionStrategy::Fail => "conflicts: fail",
+        ConflictResolutionStrategy::AutoRebase => "conflicts: auto-rebase",
+        ConflictResolutionStrategy::PullRequest => "conflicts: pull request",
+        ConflictResolutionStrategy::AutoRebasePullRequest => {
+            "conflicts: auto-rebase + pull request"
+        }
+    }
 }
 
 fn print_pat_instructions(

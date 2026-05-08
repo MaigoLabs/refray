@@ -181,6 +181,83 @@ fn branch_decisions_force_selects_newest_divergent_tip() {
 }
 
 #[test]
+fn auto_rebase_branch_conflict_replays_later_tip_and_marks_force_targets() {
+    let fixture = GitFixture::new();
+    let base = fixture.commit("base", "base", 1_700_000_000);
+    fixture.push_head(&fixture.remote_a, "main");
+    fixture.push_head(&fixture.remote_b, "main");
+
+    let a_tip = fixture.commit_file("a", "a.txt", "a\n", 1_700_000_100);
+    fixture.push_head(&fixture.remote_a, "main");
+    fixture.reset_hard(&base);
+    let b_tip = fixture.commit_file("b", "b.txt", "b\n", 1_700_000_200);
+    fixture.push_head(&fixture.remote_b, "main");
+
+    let mirror = fixture.mirror();
+    fixture.fetch_all(&mirror);
+    let (_, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+
+    let decision = mirror
+        .auto_rebase_branch_conflict(&fixture.remotes(), "main", &conflicts[0].tips)
+        .unwrap();
+
+    assert_eq!(decision.branch, "main");
+    assert_ne!(decision.sha, a_tip);
+    assert_ne!(decision.sha, b_tip);
+    assert_eq!(decision.updates.len(), 2);
+    let a_update = decision
+        .updates
+        .iter()
+        .find(|update| update.target_remote == "a")
+        .unwrap();
+    assert!(!a_update.force);
+    let b_update = decision
+        .updates
+        .iter()
+        .find(|update| update.target_remote == "b")
+        .unwrap();
+    assert!(b_update.force);
+
+    mirror
+        .push_branch_updates(&fixture.remotes(), &decision.updates)
+        .unwrap();
+    assert_eq!(
+        fixture.remote_ref(&fixture.remote_a, "refs/heads/main"),
+        decision.sha
+    );
+    assert_eq!(
+        fixture.remote_ref(&fixture.remote_b, "refs/heads/main"),
+        decision.sha
+    );
+}
+
+#[test]
+fn auto_rebase_branch_conflict_fails_on_file_conflict() {
+    let fixture = GitFixture::new();
+    fixture.commit_file("base", "file.txt", "base\n", 1_700_000_000);
+    let base = fixture.head();
+    fixture.push_head(&fixture.remote_a, "main");
+    fixture.push_head(&fixture.remote_b, "main");
+
+    fixture.commit_file("a", "file.txt", "a\n", 1_700_000_100);
+    fixture.push_head(&fixture.remote_a, "main");
+    fixture.reset_hard(&base);
+    fixture.commit_file("b", "file.txt", "b\n", 1_700_000_200);
+    fixture.push_head(&fixture.remote_b, "main");
+
+    let mirror = fixture.mirror();
+    fixture.fetch_all(&mirror);
+    let (_, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+
+    let error = mirror
+        .auto_rebase_branch_conflict(&fixture.remotes(), "main", &conflicts[0].tips)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("auto-rebase failed"));
+}
+
+#[test]
 fn push_branches_creates_missing_branch_on_other_remotes() {
     let fixture = GitFixture::new();
     let expected = fixture.commit("base", "base", 1_700_000_000);
@@ -356,6 +433,29 @@ impl GitFixture {
             .unwrap();
         writeln!(file, "{contents}").unwrap();
         git(Some(&self.work), ["add", "file.txt"]);
+
+        let date = format!("@{timestamp} +0000");
+        let output = Command::new("git")
+            .current_dir(&self.work)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .args(["commit", "-m", message])
+            .output()
+            .unwrap();
+        assert_success(&output, "git commit");
+        self.head()
+    }
+
+    fn commit_file(
+        &self,
+        message: &str,
+        file_name: &str,
+        contents: &str,
+        timestamp: i64,
+    ) -> String {
+        let path = self.work.join(file_name);
+        fs::write(path, contents).unwrap();
+        git(Some(&self.work), ["add", file_name]);
 
         let date = format!("@{timestamp} +0000");
         let output = Command::new("git")

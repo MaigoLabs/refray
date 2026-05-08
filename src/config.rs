@@ -55,6 +55,18 @@ pub struct MirrorConfig {
     pub visibility: Visibility,
     #[serde(default)]
     pub allow_force: bool,
+    #[serde(default)]
+    pub conflict_resolution: ConflictResolutionStrategy,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictResolutionStrategy {
+    #[default]
+    Fail,
+    AutoRebase,
+    PullRequest,
+    AutoRebasePullRequest,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

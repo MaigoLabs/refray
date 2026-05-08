@@ -11,6 +11,7 @@ fn wizard_builds_sync_group_from_profile_urls() {
         "gt-token",
         "",
         "n",
+        "",
         "n",
         "4",
     ]
@@ -44,6 +45,10 @@ fn wizard_builds_sync_group_from_profile_urls() {
     assert!(config.mirrors[0].create_missing);
     assert_eq!(config.mirrors[0].visibility, Visibility::Private);
     assert!(!config.mirrors[0].allow_force);
+    assert_eq!(
+        config.mirrors[0].conflict_resolution,
+        ConflictResolutionStrategy::AutoRebasePullRequest
+    );
 
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("1. github.com/hykilpikonna <-> gitea.example.test/azalea"));
@@ -67,6 +72,7 @@ fn wizard_can_build_three_way_sync() {
         "gt-token",
         "",
         "n",
+        "",
         "n",
         "4",
     ]
@@ -92,6 +98,7 @@ fn wizard_can_enable_webhooks() {
         "gt-token",
         "",
         "n",
+        "",
         "y",
         "https://mirror.example.test/webhook",
         "y",
@@ -142,6 +149,7 @@ fn wizard_reuses_existing_credentials_for_same_instance() {
         "https://github.com/bob",
         "",
         "n",
+        "",
         "n",
         "4",
     ]
@@ -195,6 +203,7 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
@@ -256,6 +265,7 @@ fn wizard_edits_existing_sync_group_from_menu() {
             create_missing: false,
             visibility: Visibility::Public,
             allow_force: true,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
@@ -267,6 +277,7 @@ fn wizard_edits_existing_sync_group_from_menu() {
         "https://gitlab.com/bob",
         "",
         "n",
+        "",
         "n",
         "4",
     ]
@@ -333,10 +344,11 @@ fn wizard_prefills_existing_sync_group_when_editing() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
-    let input = ["2", "1", "", "", "", "", "n", "n", "4"].join("\n") + "\n";
+    let input = ["2", "1", "", "", "", "", "n", "", "n", "4"].join("\n") + "\n";
     let mut reader = Cursor::new(input.as_bytes());
     let mut output = Vec::new();
 
@@ -393,6 +405,7 @@ fn wizard_deletes_existing_sync_group_from_menu() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
@@ -448,6 +461,7 @@ fn wizard_can_go_back_from_delete_menu() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
