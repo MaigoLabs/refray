@@ -220,6 +220,43 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
 }
 
 #[test]
+fn wizard_can_ask_to_run_full_sync_after_config() {
+    let config = Config {
+        sites: Vec::new(),
+        mirrors: vec![MirrorConfig {
+            name: "sync-1".to_string(),
+            endpoints: Vec::new(),
+            create_missing: true,
+            visibility: Visibility::Private,
+            allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
+        }],
+        webhook: None,
+    };
+    let mut reader = Cursor::new(b"y\n".as_slice());
+    let mut output = Vec::new();
+
+    let run_full_sync =
+        prompt_run_full_sync_now_with_io(&config, &mut reader, &mut output).unwrap();
+
+    assert!(run_full_sync);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Run full sync now? [y/N]:"));
+}
+
+#[test]
+fn wizard_skips_full_sync_prompt_without_sync_groups() {
+    let mut reader = Cursor::new(b"".as_slice());
+    let mut output = Vec::new();
+
+    let run_full_sync =
+        prompt_run_full_sync_now_with_io(&Config::default(), &mut reader, &mut output).unwrap();
+
+    assert!(!run_full_sync);
+    assert!(output.is_empty());
+}
+
+#[test]
 fn wizard_edits_existing_sync_group_from_menu() {
     let config = Config {
         sites: vec![

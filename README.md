@@ -1,6 +1,6 @@
 # refray
 
-A tool to keep ALL of your repos in sync across ALL git platforms, while being able to work from any one of them. 
+A tool to keep your repos in sync across all git platforms, while being able to work from everywhere all at once. 
 
 Created becasue github is so unusable and unreliable and I want to leave, but I don't want to leave the community behind.
 
@@ -21,6 +21,26 @@ Supported platforms: GitHub, GitLab, Gitea, Forgejo
 ### Option 2. Download binary
 
 Go to the [releases page](https://github.com/MaigoLabs/refray/releases), find the latest release, and download the appropriate binary for your platform.
+
+### Option 3. Docker Compose
+
+Run config wizard:
+
+```sh
+docker compose run --rm refray config
+```
+
+Start the webhook receiver as a service:
+
+```sh
+docker compose up -d --build
+```
+
+To edit config manually:
+
+```sh
+docker compose run --rm --entrypoint nano refray /data/config/refray/config.toml
+```
 
 ## Configure
 

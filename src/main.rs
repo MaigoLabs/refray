@@ -146,7 +146,14 @@ fn main() -> Result<()> {
     let config_path = cli.config.unwrap_or_else(default_config_path);
 
     match cli.command {
-        Command::Config => interactive::run_config_wizard(&config_path),
+        Command::Config => {
+            let outcome = interactive::run_config_wizard(&config_path)?;
+            if outcome.run_full_sync_now {
+                sync_all(&outcome.config, SyncOptions::default())
+            } else {
+                Ok(())
+            }
+        }
         Command::Sync(command) => {
             let config = load_config(&config_path)?;
             sync_all(
