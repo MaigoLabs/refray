@@ -343,7 +343,11 @@ impl<'a> ProviderClient<'a> {
             "{pulls_url}?state=open&base={}&per_page=100",
             urlencoding(base_branch)
         );
-        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        let pulls: Vec<ProviderPullRequest> = match self.paged_get(&url) {
+            Ok(pulls) => pulls,
+            Err(error) if is_not_found_error(&error) => return Ok(0),
+            Err(error) => return Err(error),
+        };
         let mut closed = 0;
         for pull in pulls.into_iter().filter(|pull| {
             pull.head_ref()
@@ -681,7 +685,11 @@ impl<'a> ProviderClient<'a> {
             "{pulls_url}?state=open&base={}&limit=50",
             urlencoding(base_branch)
         );
-        let pulls: Vec<ProviderPullRequest> = self.paged_get(&url)?;
+        let pulls: Vec<ProviderPullRequest> = match self.paged_get(&url) {
+            Ok(pulls) => pulls,
+            Err(error) if is_not_found_error(&error) => return Ok(0),
+            Err(error) => return Err(error),
+        };
         let mut closed = 0;
         for pull in pulls.into_iter().filter(|pull| {
             pull.head_ref()
@@ -929,6 +937,10 @@ fn check_response(method: &str, url: &str, response: Response) -> Result<Respons
     let status = response.status();
     let body = response.text().unwrap_or_default();
     bail!("{method} {url} returned {status}: {body}");
+}
+
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("404 Not Found")
 }
 
 fn next_link(headers: &HeaderMap) -> Option<String> {

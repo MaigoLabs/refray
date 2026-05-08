@@ -204,6 +204,7 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
             style("Webhook group").cyan().bold(),
             style(&mirror.name).bold()
         );
+        let repo_filter = mirror.repo_filter()?;
         let mut tasks = Vec::new();
         for endpoint in &mirror.endpoints {
             let site = config.site(&endpoint.site).unwrap();
@@ -216,7 +217,11 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
             let repos = client
                 .list_repos(endpoint)
                 .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
-            for repo in repos {
+            for repo in repos
+                .into_iter()
+                .filter(|repo| mirror.sync_visibility.matches_private(repo.private))
+                .filter(|repo| repo_filter.matches(&repo.name))
+            {
                 if options.repo.as_ref().is_some_and(|name| name != &repo.name) {
                     continue;
                 }
@@ -1009,19 +1014,22 @@ fn matching_jobs(config: &Config, event: &WebhookEvent) -> Vec<WebhookJob> {
         .mirrors
         .iter()
         .filter(|mirror| {
-            mirror.endpoints.iter().any(|endpoint| {
-                let Some(site) = config.site(&endpoint.site) else {
-                    return false;
-                };
-                event
-                    .provider
-                    .as_ref()
-                    .is_none_or(|provider| &site.provider == provider)
-                    && event
-                        .namespace
+            mirror
+                .repo_filter()
+                .is_ok_and(|filter| filter.matches(&event.repo))
+                && mirror.endpoints.iter().any(|endpoint| {
+                    let Some(site) = config.site(&endpoint.site) else {
+                        return false;
+                    };
+                    event
+                        .provider
                         .as_ref()
-                        .is_none_or(|namespace| namespace == &endpoint.namespace)
-            })
+                        .is_none_or(|provider| &site.provider == provider)
+                        && event
+                            .namespace
+                            .as_ref()
+                            .is_none_or(|namespace| namespace == &endpoint.namespace)
+                })
         })
         .map(|mirror| WebhookJob {
             group: mirror.name.clone(),

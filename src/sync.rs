@@ -9,12 +9,12 @@ use console::style;
 use regex::Regex;
 
 use crate::config::{
-    Config, ConflictResolutionStrategy, EndpointConfig, MirrorConfig, default_work_dir,
-    validate_config,
+    Config, ConflictResolutionStrategy, EndpointConfig, MirrorConfig, RepoNameFilter,
+    SyncVisibility, default_work_dir, validate_config,
 };
 use crate::git::{
-    BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RemoteRefSnapshot,
-    RemoteSpec, is_disabled_repository_error, ls_remote_refs, safe_remote_name,
+    BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RemoteSpec,
+    is_disabled_repository_error, ls_remote_refs, safe_remote_name,
 };
 use crate::logging;
 use crate::provider::{EndpointRepo, ProviderClient, PullRequestRequest, repos_by_name};
@@ -165,8 +165,9 @@ fn sync_group(
         .create_missing_override
         .unwrap_or(mirror.create_missing);
     let allow_force = context.options.force_override.unwrap_or(mirror.allow_force);
+    let repo_filter = mirror.repo_filter()?;
 
-    let all_endpoint_repos = list_group_repos(context.config, mirror)?;
+    let all_endpoint_repos = list_group_repos(context.config, mirror, &repo_filter)?;
     if !context.options.dry_run {
         webhook::ensure_configured_webhooks(
             context.config,
@@ -181,12 +182,7 @@ fn sync_group(
     let retry_repo_names = context
         .retry_failed_repos
         .and_then(|repos| repos.get(&mirror.name));
-    let tracked_repo_names = context.ref_state.repo_names(&mirror.name);
-    let all_repo_names = repos
-        .keys()
-        .cloned()
-        .chain(tracked_repo_names)
-        .collect::<BTreeSet<_>>();
+    let all_repo_names = sync_candidate_repo_names(&repos, context.ref_state, mirror, &repo_filter);
     let all_repo_count = all_repo_names.len();
     let repo_names = all_repo_names
         .into_iter()
@@ -349,7 +345,7 @@ fn sync_group(
     });
 
     if create_missing && !context.options.dry_run {
-        let repos = list_group_repos(context.config, mirror)?;
+        let repos = list_group_repos(context.config, mirror, &repo_filter)?;
         webhook::ensure_configured_webhooks(
             context.config,
             mirror,
@@ -362,7 +358,11 @@ fn sync_group(
     Ok(failures)
 }
 
-fn list_group_repos(config: &Config, mirror: &MirrorConfig) -> Result<Vec<EndpointRepo>> {
+fn list_group_repos(
+    config: &Config,
+    mirror: &MirrorConfig,
+    repo_filter: &RepoNameFilter,
+) -> Result<Vec<EndpointRepo>> {
     let mut all_endpoint_repos = Vec::new();
     for endpoint in &mirror.endpoints {
         let site = config.site(&endpoint.site).unwrap();
@@ -375,7 +375,11 @@ fn list_group_repos(config: &Config, mirror: &MirrorConfig) -> Result<Vec<Endpoi
         let repos = client
             .list_repos(endpoint)
             .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
-        for repo in repos {
+        for repo in repos
+            .into_iter()
+            .filter(|repo| mirror.sync_visibility.matches_private(repo.private))
+            .filter(|repo| repo_filter.matches(&repo.name))
+        {
             all_endpoint_repos.push(EndpointRepo {
                 endpoint: endpoint.clone(),
                 repo,
@@ -383,6 +387,24 @@ fn list_group_repos(config: &Config, mirror: &MirrorConfig) -> Result<Vec<Endpoi
         }
     }
     Ok(all_endpoint_repos)
+}
+
+fn sync_candidate_repo_names(
+    repos: &HashMap<String, Vec<EndpointRepo>>,
+    ref_state: &RefState,
+    mirror: &MirrorConfig,
+    repo_filter: &RepoNameFilter,
+) -> BTreeSet<String> {
+    let mut names = repos.keys().cloned().collect::<BTreeSet<_>>();
+    if mirror.sync_visibility == SyncVisibility::All {
+        names.extend(
+            ref_state
+                .repo_names(&mirror.name)
+                .into_iter()
+                .filter(|name| repo_filter.matches(name)),
+        );
+    }
+    names
 }
 
 fn pop_repo_job(queue: &Arc<Mutex<VecDeque<RepoSyncJob>>>) -> Option<RepoSyncJob> {
@@ -561,19 +583,6 @@ fn sync_repo(
 
     mirror_repo.configure_remotes(&initial_remotes)?;
     let cached_ref_state = cached_ref_state(&mirror_repo, &initial_remotes)?;
-    if !context.dry_run
-        && all_endpoints_present
-        && cached_refs_match(&mirror_repo, &initial_remotes, &initial_ref_state)?
-    {
-        crate::logln!(
-            "  {} refs unchanged from local mirror cache",
-            style("up-to-date").green().bold()
-        );
-        return Ok(RepoSyncOutcome {
-            state_update: Some(RepoStateUpdate::Set(initial_ref_state)),
-        });
-    }
-
     for remote in &initial_remotes {
         if let Err(error) = mirror_repo.fetch_remote(remote) {
             if is_disabled_repository_error(&error) {
@@ -770,22 +779,6 @@ fn all_configured_endpoints_present(mirror: &MirrorConfig, repos: &[EndpointRepo
         .endpoints
         .iter()
         .all(|endpoint| present.contains(endpoint))
-}
-
-fn cached_refs_match(
-    mirror_repo: &GitMirror,
-    remotes: &[RemoteSpec],
-    expected_refs: &BTreeMap<String, RemoteRefState>,
-) -> Result<bool> {
-    for remote in remotes {
-        let Some(expected) = expected_refs.get(&remote.name) else {
-            return Ok(false);
-        };
-        if !mirror_repo.cached_remote_refs_match(remote, &RemoteRefSnapshot::from(expected))? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn cached_ref_state(
@@ -1144,6 +1137,9 @@ fn open_conflict_pull_requests(
             for (source_remote, source_sha) in
                 conflict.tips.iter().filter(|(_, sha)| sha != target_sha)
             {
+                if mirror_repo.is_ancestor(source_sha, target_sha)? {
+                    continue;
+                }
                 let head_branch = conflict_pr_branch(&conflict.branch, source_remote, source_sha);
                 let update = BranchUpdate {
                     branch: head_branch.clone(),

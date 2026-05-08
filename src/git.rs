@@ -133,6 +133,7 @@ impl GitMirror {
         self.run(["fetch", "--prune", &remote.name, &tag_refspec])
     }
 
+    #[cfg(test)]
     pub fn cached_remote_refs_match(
         &self,
         remote: &RemoteSpec,
@@ -589,7 +590,7 @@ impl GitMirror {
         Ok(rebased.trim().to_string())
     }
 
-    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         let status = self
             .command()
             .args(["merge-base", "--is-ancestor", ancestor, descendant])

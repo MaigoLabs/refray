@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use directories::ProjectDirs;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "refray";
@@ -51,6 +52,12 @@ pub enum TokenConfig {
 pub struct MirrorConfig {
     pub name: String,
     pub endpoints: Vec<EndpointConfig>,
+    #[serde(default)]
+    pub sync_visibility: SyncVisibility,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_whitelist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_blacklist: Vec<String>,
     #[serde(default = "default_true")]
     pub create_missing: bool,
     #[serde(default)]
@@ -104,6 +111,65 @@ pub enum Visibility {
     #[default]
     Private,
     Public,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncVisibility {
+    #[default]
+    All,
+    Private,
+    Public,
+}
+
+#[derive(Clone, Debug)]
+pub struct RepoNameFilter {
+    whitelist: Vec<Regex>,
+    blacklist: Vec<Regex>,
+}
+
+impl SyncVisibility {
+    pub fn matches_private(&self, private: bool) -> bool {
+        match self {
+            SyncVisibility::All => true,
+            SyncVisibility::Private => private,
+            SyncVisibility::Public => !private,
+        }
+    }
+}
+
+impl MirrorConfig {
+    pub fn repo_filter(&self) -> Result<RepoNameFilter> {
+        Ok(RepoNameFilter {
+            whitelist: compile_repo_patterns(&self.name, "repo_whitelist", &self.repo_whitelist)?,
+            blacklist: compile_repo_patterns(&self.name, "repo_blacklist", &self.repo_blacklist)?,
+        })
+    }
+}
+
+impl RepoNameFilter {
+    pub fn matches(&self, repo_name: &str) -> bool {
+        let whitelisted = self.whitelist.is_empty()
+            || self
+                .whitelist
+                .iter()
+                .any(|pattern| pattern.is_match(repo_name));
+        let blacklisted = self
+            .blacklist
+            .iter()
+            .any(|pattern| pattern.is_match(repo_name));
+        whitelisted && !blacklisted
+    }
+}
+
+fn compile_repo_patterns(mirror: &str, field: &str, patterns: &[String]) -> Result<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern)
+                .with_context(|| format!("mirror '{mirror}' has invalid {field} regex '{pattern}'"))
+        })
+        .collect()
 }
 
 fn default_true() -> bool {
@@ -262,6 +328,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
         bail!("no mirror groups configured");
     }
     for mirror in &config.mirrors {
+        mirror.repo_filter()?;
         if mirror.endpoints.len() < 2 {
             bail!(
                 "mirror '{}' must contain at least two endpoints",
