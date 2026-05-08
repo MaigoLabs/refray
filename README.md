@@ -24,21 +24,13 @@ Go to the [releases page](https://github.com/MaigoLabs/refray/releases), find th
 
 ### Option 3. Docker Compose
 
-Run config wizard:
-
 ```sh
 docker compose run --rm refray config
-```
 
-Start the webhook receiver as a service:
-
-```sh
+# Start the webhook receiver as a service
 docker compose up -d --build
-```
 
-To edit config manually:
-
-```sh
+# If you want to edit config manually:
 docker compose run --rm --entrypoint nano refray /data/config/refray/config.toml
 ```
 
