@@ -89,50 +89,24 @@ enum WebhookCommand {
 
 #[derive(Args, Debug)]
 struct WebhookInstallCommand {
-    #[arg(value_name = "REPO", conflicts_with = "repo_pattern")]
-    repo: Option<String>,
-    #[arg(long, value_name = "URL")]
-    url: Option<String>,
-    #[arg(long, conflicts_with = "secret_env")]
-    secret: Option<String>,
-    #[arg(long, value_name = "ENV", conflicts_with = "secret")]
-    secret_env: Option<String>,
-    #[arg(long, value_name = "NAME")]
-    group: Option<String>,
-    #[arg(long, value_name = "REGEX")]
-    repo_pattern: Option<String>,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, value_name = "PATH")]
-    work_dir: Option<PathBuf>,
     #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
     jobs: usize,
 }
 
 #[derive(Args, Debug)]
 struct WebhookUninstallCommand {
-    #[arg(value_name = "REPO")]
-    repo: Option<String>,
-    #[arg(long, value_name = "URL")]
-    url: Option<String>,
-    #[arg(long, value_name = "NAME")]
-    group: Option<String>,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, value_name = "PATH")]
-    work_dir: Option<PathBuf>,
     #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
     jobs: usize,
 }
 
 #[derive(Args, Debug)]
 struct WebhookUpdateCommand {
-    #[arg(long, value_name = "URL")]
+    #[arg(value_name = "URL")]
     url: String,
-    #[arg(long, conflicts_with = "secret_env")]
-    secret: Option<String>,
-    #[arg(long, value_name = "ENV", conflicts_with = "secret")]
-    secret_env: Option<String>,
     #[arg(long)]
     dry_run: bool,
     #[arg(long, value_name = "PATH")]
@@ -199,33 +173,28 @@ fn main() -> Result<()> {
         }
         Command::Webhook(WebhookCommand::Install(command)) => {
             let config = load_config(&config_path)?;
-            let secret = resolve_webhook_secret(&config, command.secret, command.secret_env)?;
-            let url = resolve_webhook_url(&config, command.url)?;
+            let secret = resolve_config_webhook_secret(&config)?;
+            let url = resolve_config_webhook_url(&config)?;
             install_webhooks(
                 &config,
                 WebhookInstallOptions {
                     url,
                     secret,
-                    group: command.group,
-                    repo: command.repo,
-                    repo_pattern: command.repo_pattern,
                     dry_run: command.dry_run,
-                    work_dir: command.work_dir,
+                    work_dir: None,
                     jobs: command.jobs,
                 },
             )
         }
         Command::Webhook(WebhookCommand::Uninstall(command)) => {
             let config = load_config(&config_path)?;
-            let url = resolve_webhook_url(&config, command.url)?;
+            let url = resolve_config_webhook_url(&config)?;
             uninstall_webhooks(
                 &config,
                 WebhookUninstallOptions {
                     url,
-                    group: command.group,
-                    repo: command.repo,
                     dry_run: command.dry_run,
-                    work_dir: command.work_dir,
+                    work_dir: None,
                     jobs: command.jobs,
                 },
             )
@@ -239,7 +208,7 @@ fn main() -> Result<()> {
                 .ok_or_else(|| {
                     anyhow::anyhow!("configure [webhook] before running webhook update")
                 })?;
-            let secret = resolve_webhook_secret(&config, command.secret, command.secret_env)?;
+            let secret = resolve_config_webhook_secret(&config)?;
             update_webhooks(
                 &config,
                 WebhookUpdateOptions {
@@ -261,7 +230,24 @@ fn main() -> Result<()> {
 }
 
 fn load_config(path: &Path) -> Result<Config> {
+    if !path.exists() {
+        anyhow::bail!(
+            "config not found at {}. Run `refray config` first to create one.",
+            path.display()
+        );
+    }
     Config::load(path).with_context(|| format!("failed to load config at {}", path.display()))
+}
+
+fn resolve_config_webhook_secret(config: &Config) -> Result<String> {
+    config
+        .webhook
+        .as_ref()
+        .map(|webhook| webhook.secret())
+        .transpose()?
+        .ok_or_else(|| {
+            anyhow::anyhow!("configure [webhook].secret before running webhook commands")
+        })
 }
 
 fn resolve_webhook_secret(
@@ -283,10 +269,12 @@ fn resolve_webhook_secret(
     }
 }
 
-fn resolve_webhook_url(config: &Config, value: Option<String>) -> Result<String> {
-    value
-        .or_else(|| config.webhook.as_ref().map(|webhook| webhook.url.clone()))
-        .ok_or_else(|| anyhow::anyhow!("pass --url or configure [webhook].url"))
+fn resolve_config_webhook_url(config: &Config) -> Result<String> {
+    config
+        .webhook
+        .as_ref()
+        .map(|webhook| webhook.url.clone())
+        .ok_or_else(|| anyhow::anyhow!("configure [webhook].url before running webhook commands"))
 }
 
 fn set_config_webhook_url(config: &mut Config, url: String) {
