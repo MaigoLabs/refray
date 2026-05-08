@@ -22,6 +22,7 @@ fn parses_token_forms() {
         create_missing = true
         visibility = "private"
         allow_force = false
+        conflict_resolution = "auto_rebase_pull_request"
 
         [[mirrors.endpoints]]
         site = "github"
@@ -38,6 +39,10 @@ fn parses_token_forms() {
 
     assert_eq!(config.sites.len(), 1);
     assert_eq!(config.mirrors[0].endpoints.len(), 2);
+    assert_eq!(
+        config.mirrors[0].conflict_resolution,
+        ConflictResolutionStrategy::AutoRebasePullRequest
+    );
     let webhook = config.webhook.unwrap();
     assert!(webhook.install);
     assert_eq!(webhook.url, "https://mirror.example.test/webhook");
@@ -62,6 +67,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
@@ -87,6 +93,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };

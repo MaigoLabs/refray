@@ -255,6 +255,120 @@ fn uninstall_webhook_deletes_matching_github_hook() {
     handle.join().unwrap();
 }
 
+#[test]
+fn open_pull_request_posts_github_pull_when_missing() {
+    let (api_url, handle) = request_server(
+        vec![
+            ("200 OK", "[]"),
+            (
+                "201 Created",
+                r#"{"number":7,"html_url":"https://github.example.test/pull/7"}"#,
+            ),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request
+                    .starts_with("GET /repos/alice/repo/pulls?state=open&base=main&per_page=100 "),
+                "request was {request}"
+            ),
+            1 => {
+                assert!(
+                    request.starts_with("POST /repos/alice/repo/pulls "),
+                    "request was {request}"
+                );
+                assert!(request.contains("Resolve conflict"));
+                assert!(request.contains("git-sync/conflicts/main/from-b-abc123"));
+                assert!(request.contains("main"));
+            }
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Github, None)
+    };
+    let client = ProviderClient::new(&site).unwrap();
+
+    let pr = client
+        .open_pull_request(
+            &EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            &RemoteRepo {
+                name: "repo".to_string(),
+                clone_url: "https://github.com/alice/repo.git".to_string(),
+                private: true,
+                description: None,
+            },
+            &PullRequestRequest {
+                title: "Resolve conflict".to_string(),
+                body: "Body".to_string(),
+                head_branch: "git-sync/conflicts/main/from-b-abc123".to_string(),
+                base_branch: "main".to_string(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(pr.url.unwrap(), "https://github.example.test/pull/7");
+    handle.join().unwrap();
+}
+
+#[test]
+fn close_pull_requests_by_head_prefix_closes_matching_github_pulls() {
+    let (api_url, handle) = request_server(
+        vec![
+            (
+                "200 OK",
+                r#"[{"number":7,"head":{"ref":"git-sync/conflicts/main/from-b-abc123"}},{"number":8,"head":{"ref":"feature"}}]"#,
+            ),
+            ("200 OK", r#"{"number":7}"#),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request
+                    .starts_with("GET /repos/alice/repo/pulls?state=open&base=main&per_page=100 "),
+                "request was {request}"
+            ),
+            1 => {
+                assert!(
+                    request.starts_with("PATCH /repos/alice/repo/pulls/7 "),
+                    "request was {request}"
+                );
+                assert!(request.contains("closed"));
+            }
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Github, None)
+    };
+    let client = ProviderClient::new(&site).unwrap();
+
+    let closed = client
+        .close_pull_requests_by_head_prefix(
+            &EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            &RemoteRepo {
+                name: "repo".to_string(),
+                clone_url: "https://github.com/alice/repo.git".to_string(),
+                private: true,
+                description: None,
+            },
+            "main",
+            "git-sync/conflicts/main/",
+        )
+        .unwrap();
+
+    assert_eq!(closed, 1);
+    handle.join().unwrap();
+}
+
 fn site(provider: ProviderKind, git_username: Option<String>) -> SiteConfig {
     SiteConfig {
         name: "site".to_string(),

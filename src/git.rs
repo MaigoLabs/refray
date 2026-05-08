@@ -45,6 +45,21 @@ pub struct BranchDeletion {
 }
 
 #[derive(Clone, Debug)]
+pub struct BranchUpdate {
+    pub branch: String,
+    pub sha: String,
+    pub target_remote: String,
+    pub force: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct BranchRebaseDecision {
+    pub branch: String,
+    pub sha: String,
+    pub updates: Vec<BranchUpdate>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TagDecision {
     pub tag: String,
     pub sha: String,
@@ -299,6 +314,91 @@ impl GitMirror {
         Ok(())
     }
 
+    pub fn push_branch_updates(
+        &self,
+        remotes: &[RemoteSpec],
+        updates: &[BranchUpdate],
+    ) -> Result<()> {
+        for update in updates {
+            let remote = remotes
+                .iter()
+                .find(|remote| remote.name == update.target_remote)
+                .with_context(|| format!("unknown remote '{}'", update.target_remote))?;
+            self.push_branch_update(remote, update)?;
+        }
+        Ok(())
+    }
+
+    pub fn remote_branch_names_with_prefix(
+        &self,
+        remote: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .remote_branches(remote)?
+            .into_iter()
+            .filter_map(|(branch, _)| branch.starts_with(prefix).then_some(branch))
+            .collect())
+    }
+
+    pub fn auto_rebase_branch_conflict(
+        &self,
+        remotes: &[RemoteSpec],
+        branch: &str,
+        tips: &[(String, String)],
+    ) -> Result<BranchRebaseDecision> {
+        let mut ordered_tips = Vec::new();
+        for remote in remotes {
+            let Some((_, sha)) = tips.iter().find(|(name, _)| name == &remote.name) else {
+                continue;
+            };
+            if !ordered_tips
+                .iter()
+                .any(|(_, existing): &(String, String)| existing == sha)
+            {
+                ordered_tips.push((remote.name.clone(), sha.clone()));
+            }
+        }
+        if ordered_tips.len() < 2 {
+            bail!("branch {branch} does not have enough unique tips to auto-rebase");
+        }
+
+        let mut truth = ordered_tips[0].1.clone();
+        for (remote, sha) in ordered_tips.iter().skip(1) {
+            let base = self.merge_base(&truth, sha)?;
+            crate::logln!(
+                "  {} branch {} rebasing {}@{} onto {}",
+                style("auto-rebase").cyan().bold(),
+                style(branch).cyan(),
+                remote,
+                short_sha(sha),
+                short_sha(&truth)
+            );
+            truth = self
+                .rebase_tip_onto(&truth, &base, sha)
+                .with_context(|| format!("auto-rebase failed for branch {branch}"))?;
+        }
+
+        let mut updates = Vec::new();
+        for (remote, sha) in tips {
+            if sha == &truth {
+                continue;
+            }
+            updates.push(BranchUpdate {
+                branch: branch.to_string(),
+                sha: truth.clone(),
+                target_remote: remote.clone(),
+                force: !self.is_ancestor(sha, &truth)?,
+            });
+        }
+
+        Ok(BranchRebaseDecision {
+            branch: branch.to_string(),
+            sha: truth,
+            updates,
+        })
+    }
+
     pub fn push_tags(&self, remotes: &[RemoteSpec], tags: &[TagDecision]) -> Result<()> {
         for remote in remotes {
             for tag in tags {
@@ -341,6 +441,23 @@ impl GitMirror {
             }
         }
         Ok(())
+    }
+
+    fn push_branch_update(&self, remote: &RemoteSpec, update: &BranchUpdate) -> Result<()> {
+        let refspec = if update.force {
+            format!("+{}:refs/heads/{}", update.sha, update.branch)
+        } else {
+            format!("{}:refs/heads/{}", update.sha, update.branch)
+        };
+        let label = if update.force { "force-push" } else { "push" };
+        crate::logln!(
+            "  {} {} {} {}",
+            style(label).green().bold(),
+            style("branch").dim(),
+            style(&update.branch).cyan(),
+            style(format!("-> {}", remote.display)).dim()
+        );
+        self.run(["push", &remote.name, &refspec])
     }
 
     fn remote_url(&self, name: &str) -> Result<Option<String>> {
@@ -432,6 +549,46 @@ impl GitMirror {
             .context("no commits found while choosing force winner")
     }
 
+    fn merge_base(&self, left: &str, right: &str) -> Result<String> {
+        Ok(self.output(["merge-base", left, right])?.trim().to_string())
+    }
+
+    fn rebase_tip_onto(&self, onto: &str, base: &str, tip: &str) -> Result<String> {
+        if self.dry_run {
+            return Ok(format!("dry-run-rebased-{}", short_sha(tip)));
+        }
+
+        let worktree = tempfile::TempDir::new().context("failed to create temporary worktree")?;
+        let worktree_path = worktree.path().to_path_buf();
+        self.run([
+            "worktree",
+            "add",
+            "--detach",
+            worktree_path.to_str().unwrap(),
+            tip,
+        ])?;
+
+        let rebase_result = self.worktree_git(&worktree_path, ["rebase", "--onto", onto, base]);
+        if let Err(error) = rebase_result {
+            let _ = self.worktree_git(&worktree_path, ["rebase", "--abort"]);
+            let _ = self.run([
+                "worktree",
+                "remove",
+                "--force",
+                worktree_path.to_str().unwrap(),
+            ]);
+            return Err(error);
+        }
+        let rebased = self.worktree_git_output(&worktree_path, ["rev-parse", "HEAD"])?;
+        self.run([
+            "worktree",
+            "remove",
+            "--force",
+            worktree_path.to_str().unwrap(),
+        ])?;
+        Ok(rebased.trim().to_string())
+    }
+
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         let status = self
             .command()
@@ -484,6 +641,54 @@ impl GitMirror {
         command.arg("--git-dir").arg(&self.path);
         command
     }
+
+    fn worktree_git<const N: usize>(&self, worktree: &Path, args: [&str; N]) -> Result<()> {
+        run_plain(
+            "git",
+            [
+                "-C",
+                worktree.to_str().unwrap(),
+                "-c",
+                "user.name=git-sync",
+                "-c",
+                "user.email=git-sync@example.invalid",
+            ]
+            .into_iter()
+            .chain(args),
+            None,
+            &self.redactor,
+            self.dry_run,
+        )
+    }
+
+    fn worktree_git_output<const N: usize>(
+        &self,
+        worktree: &Path,
+        args: [&str; N],
+    ) -> Result<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .output()
+            .with_context(|| "failed to run git")?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(GitCommandError::new(
+                "git",
+                self.redactor
+                    .redact(&String::from_utf8_lossy(&output.stdout)),
+                self.redactor
+                    .redact(&String::from_utf8_lossy(&output.stderr)),
+            )
+            .into())
+        }
+    }
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
 }
 
 pub fn ls_remote_refs(remote: &RemoteSpec, redactor: &Redactor) -> Result<RemoteRefSnapshot> {

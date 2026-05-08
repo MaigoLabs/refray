@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::{
-    EndpointConfig, MirrorConfig, NamespaceKind, SiteConfig, TokenConfig, Visibility,
+    ConflictResolutionStrategy, EndpointConfig, MirrorConfig, NamespaceKind, SiteConfig,
+    TokenConfig, Visibility,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -111,6 +112,7 @@ fn matches_jobs_by_provider_and_namespace() {
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };

@@ -146,6 +146,52 @@ fn branch_deletion_decisions_conflict_when_branch_changed_elsewhere() {
     assert_eq!(conflicts[0].changed_remotes, vec!["gitea".to_string()]);
 }
 
+#[test]
+fn branch_deletion_decisions_ignore_internal_conflict_branches() {
+    let remotes = test_remotes();
+    let conflict_branch = conflict_pr_branch("main", "gitea", "abc123");
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "github".to_string(),
+        remote_ref_state("a", &[(conflict_branch.as_str(), "111")]),
+    );
+    previous.insert(
+        "gitea".to_string(),
+        remote_ref_state("b", &[(conflict_branch.as_str(), "111")]),
+    );
+    let mut current = BTreeMap::new();
+    current.insert("github".to_string(), remote_ref_state("c", &[]));
+    current.insert(
+        "gitea".to_string(),
+        remote_ref_state("d", &[(conflict_branch.as_str(), "111")]),
+    );
+
+    let (deletions, conflicts, blocked) =
+        branch_deletion_decisions(&remotes, Some(&previous), &current);
+
+    assert!(deletions.is_empty());
+    assert!(conflicts.is_empty());
+    assert!(blocked.is_empty());
+}
+
+#[test]
+fn conflict_branch_prefixes_are_reversible_not_slug_collisions() {
+    let slash_branch = conflict_pr_branch_prefix("release/foo");
+    let dash_branch = conflict_pr_branch_prefix("release-foo");
+
+    assert_ne!(slash_branch, dash_branch);
+    assert!(slash_branch.starts_with(CONFLICT_BRANCH_ROOT));
+    assert!(dash_branch.starts_with(CONFLICT_BRANCH_ROOT));
+    assert_eq!(
+        conflict_pr_base_branch(&format!("{slash_branch}from-gitea-abc123")),
+        Some("release/foo".to_string())
+    );
+    assert_eq!(
+        conflict_pr_base_branch(&format!("{dash_branch}from-gitea-abc123")),
+        Some("release-foo".to_string())
+    );
+}
+
 fn remote_ref_state(hash: &str, branches: &[(&str, &str)]) -> RemoteRefState {
     RemoteRefState {
         hash: hash.to_string(),
