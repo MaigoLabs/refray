@@ -2,12 +2,15 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use console::{Term, style};
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use reqwest::blocking::Client;
+use tiny_http::{Request, Response, Server, StatusCode};
 use url::Url;
 
 use crate::config::{
@@ -16,6 +19,8 @@ use crate::config::{
 };
 use crate::provider::ProviderClient;
 use crate::webhook::check_webhook_url_reachable;
+
+const DEFAULT_WEBHOOK_LISTEN: &str = "127.0.0.1:8787";
 
 #[derive(Clone, Debug)]
 struct ProfileTarget {
@@ -40,7 +45,7 @@ pub fn run_config_wizard(path: &Path) -> Result<()> {
     println!();
     println!("{}", style("git-sync configuration wizard").cyan().bold());
     let description = if existing_config {
-        "Review, add, or delete sync groups."
+        "Review, add, edit, or delete sync groups."
     } else {
         "Enter profile or organization URLs, then git-sync will build the mirror group."
     };
@@ -59,6 +64,11 @@ pub fn run_config_wizard(path: &Path) -> Result<()> {
             WizardAction::AddSyncGroup => {
                 add_sync_group_styled(&mut config, &theme)?;
                 print_sync_groups(&config);
+            }
+            WizardAction::EditSyncGroup => {
+                if edit_sync_group_styled(&mut config, &theme)? {
+                    print_sync_groups(&config);
+                }
             }
             WizardAction::DeleteSyncGroup => {
                 if delete_sync_group_styled(&mut config, &theme)? {
@@ -81,18 +91,60 @@ pub fn run_config_wizard(path: &Path) -> Result<()> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WizardAction {
     AddSyncGroup,
+    EditSyncGroup,
     DeleteSyncGroup,
     Done,
 }
 
 fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<()> {
+    let endpoints = prompt_sync_group_endpoints_styled(config, theme, &[])?;
+    config.upsert_mirror(MirrorConfig {
+        name: next_mirror_name(config),
+        endpoints,
+        create_missing: true,
+        visibility: Visibility::Private,
+        allow_force: false,
+    });
+    prompt_webhook_setup_styled(config, theme)?;
+
+    Ok(())
+}
+
+fn prompt_sync_group_endpoints_styled(
+    config: &mut Config,
+    theme: &ColorfulTheme,
+    existing: &[EndpointConfig],
+) -> Result<Vec<EndpointConfig>> {
     let mut endpoints = Vec::new();
 
-    let first = prompt_target_styled(theme, "Profile/org URL")?;
+    let first = prompt_target_styled(
+        theme,
+        "Profile/org URL",
+        endpoint_profile_url(config, existing.first()),
+    )?;
     endpoints.push(ensure_credentials_styled(config, first, theme)?);
 
-    let second = prompt_target_styled(theme, "Profile/org URL to sync with")?;
+    let second = prompt_target_styled(
+        theme,
+        "Profile/org URL to sync with",
+        endpoint_profile_url(config, existing.get(1)),
+    )?;
     endpoints.push(ensure_credentials_styled(config, second, theme)?);
+
+    for (index, endpoint) in existing.iter().enumerate().skip(2) {
+        let Some(default_url) = endpoint_profile_url(config, Some(endpoint)) else {
+            continue;
+        };
+        if !Confirm::with_theme(theme)
+            .with_prompt(format!("Keep endpoint {}?", index + 1))
+            .default(true)
+            .interact()?
+        {
+            continue;
+        }
+        let next = prompt_target_styled(theme, "Additional profile/org URL", Some(default_url))?;
+        endpoints.push(ensure_credentials_styled(config, next, theme)?);
+    }
 
     loop {
         let prompt = if endpoints.len() == 2 {
@@ -107,20 +159,11 @@ fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<(
         {
             break;
         }
-        let next = prompt_target_styled(theme, "Additional profile/org URL")?;
+        let next = prompt_target_styled(theme, "Additional profile/org URL", None)?;
         endpoints.push(ensure_credentials_styled(config, next, theme)?);
     }
 
-    config.upsert_mirror(MirrorConfig {
-        name: next_mirror_name(config),
-        endpoints,
-        create_missing: true,
-        visibility: Visibility::Private,
-        allow_force: false,
-    });
-    prompt_webhook_setup_styled(config, theme)?;
-
-    Ok(())
+    Ok(endpoints)
 }
 
 fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<()> {
@@ -152,6 +195,29 @@ fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Re
     {
         return Ok(());
     }
+    print_webhook_url_instructions();
+    let demo_server = match DemoWebhookServer::start(DEFAULT_WEBHOOK_LISTEN) {
+        Ok(server) => {
+            println!(
+                "  {} Temporary test listener running on {}",
+                style("-").cyan(),
+                style(server.listen()).bold()
+            );
+            Some(server)
+        }
+        Err(error) => {
+            println!(
+                "  {} Could not start temporary test listener on {}: {error:#}",
+                style("-").yellow(),
+                style(DEFAULT_WEBHOOK_LISTEN).bold()
+            );
+            println!(
+                "  {} If git-sync serve is already running there, you can continue.",
+                style("-").yellow()
+            );
+            None
+        }
+    };
     let url = Input::<String>::with_theme(theme)
         .with_prompt("Webhook URL reachable by GitHub/GitLab/Gitea")
         .validate_with(|value: &String| validate_url(value))
@@ -177,6 +243,7 @@ fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Re
             }
         }
     }
+    drop(demo_server);
     let full_sync_interval_minutes = if Confirm::with_theme(theme)
         .with_prompt("Run periodic full sync while the webhook server is running?")
         .default(true)
@@ -201,8 +268,111 @@ fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Re
     Ok(())
 }
 
+fn print_webhook_url_instructions() {
+    println!();
+    println!(
+        "{} {}",
+        style("Webhook URL").cyan().bold(),
+        style("must be reachable from every Git provider").dim()
+    );
+    println!(
+        "  {} Start the receiver with: {}",
+        style("-").cyan(),
+        style(format!("git-sync serve --listen {DEFAULT_WEBHOOK_LISTEN}")).bold()
+    );
+    println!(
+        "  {} The receiver accepts: {} and {}",
+        style("-").cyan(),
+        style("POST /").bold(),
+        style("POST /webhook").bold()
+    );
+    println!(
+        "  {} If running locally, expose it with a tunnel, for example: {}",
+        style("-").cyan(),
+        style(format!(
+            "cloudflared tunnel --url http://{DEFAULT_WEBHOOK_LISTEN}"
+        ))
+        .bold()
+    );
+    println!(
+        "  {} Then enter the public URL, usually ending in {}",
+        style("-").cyan(),
+        style("/webhook").bold()
+    );
+    println!(
+        "  {} The wizard starts a temporary listener on {} so you can test the tunnel now.",
+        style("-").cyan(),
+        style(DEFAULT_WEBHOOK_LISTEN).bold()
+    );
+}
+
+struct DemoWebhookServer {
+    listen: String,
+    stop: mpsc::Sender<()>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl DemoWebhookServer {
+    fn start(listen: &str) -> Result<Self> {
+        let server = Server::http(listen)
+            .map_err(|error| anyhow!("failed to listen on {listen}: {error}"))?;
+        let listen = server.server_addr().to_string();
+        let (stop, stop_receiver) = mpsc::channel();
+        let handle = thread::spawn(move || run_demo_webhook_server(server, stop_receiver));
+        Ok(Self {
+            listen,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn listen(&self) -> &str {
+        &self.listen
+    }
+}
+
+impl Drop for DemoWebhookServer {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_demo_webhook_server(server: Server, stop: mpsc::Receiver<()>) {
+    loop {
+        if stop.try_recv().is_ok() {
+            break;
+        }
+        match server.recv_timeout(Duration::from_millis(100)) {
+            Ok(Some(request)) => respond_demo_webhook_request(request),
+            Ok(None) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+fn respond_demo_webhook_request(request: Request) {
+    let path = request.url().split('?').next().unwrap_or(request.url());
+    let (status, body) = if path == "/" || path == "/webhook" {
+        (
+            StatusCode(200),
+            "git-sync webhook setup listener\nThis temporary server only confirms that your public URL reaches this machine.\nAfter saving config, run git-sync serve for real webhooks.\n",
+        )
+    } else {
+        (StatusCode(404), "not found\n")
+    };
+    let _ = request.respond(Response::from_string(body).with_status_code(status));
+}
+
 fn prompt_wizard_action_styled(theme: &ColorfulTheme) -> Result<WizardAction> {
-    let options = ["Add another sync group", "Delete an existing group", "Done"];
+    let options = [
+        "Add another sync group",
+        "Edit an existing group",
+        "Delete an existing group",
+        "Done",
+    ];
     let index = Select::with_theme(theme)
         .with_prompt("What would you like to do?")
         .items(options)
@@ -211,9 +381,44 @@ fn prompt_wizard_action_styled(theme: &ColorfulTheme) -> Result<WizardAction> {
 
     Ok(match index {
         0 => WizardAction::AddSyncGroup,
-        1 => WizardAction::DeleteSyncGroup,
+        1 => WizardAction::EditSyncGroup,
+        2 => WizardAction::DeleteSyncGroup,
         _ => WizardAction::Done,
     })
+}
+
+fn edit_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<bool> {
+    if config.mirrors.is_empty() {
+        println!("{}", style("No sync groups to edit.").yellow());
+        return Ok(false);
+    }
+
+    let mut options = numbered_sync_group_options(config);
+    options.push("Back".to_string());
+    let index = Select::with_theme(theme)
+        .with_prompt("Edit sync group")
+        .items(&options)
+        .default(0)
+        .interact()?;
+    if index == config.mirrors.len() {
+        return Ok(false);
+    }
+
+    println!(
+        "{} {}",
+        style("Editing").cyan().bold(),
+        style(format!("sync group {}", index + 1)).cyan()
+    );
+    let existing = config.mirrors[index].endpoints.clone();
+    let endpoints = prompt_sync_group_endpoints_styled(config, theme, &existing)?;
+    config.mirrors[index].endpoints = endpoints;
+    prompt_webhook_setup_styled(config, theme)?;
+    println!(
+        "{} {}",
+        style("updated").green().bold(),
+        style(format!("sync group {}", index + 1)).cyan()
+    );
+    Ok(true)
 }
 
 fn delete_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<bool> {
@@ -242,9 +447,18 @@ fn delete_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Resul
     Ok(true)
 }
 
-fn prompt_target_styled(theme: &ColorfulTheme, prompt: &str) -> Result<ProfileTarget> {
-    let url = Input::<String>::with_theme(theme)
-        .with_prompt(prompt)
+fn prompt_target_styled(
+    theme: &ColorfulTheme,
+    prompt: &str,
+    default: Option<String>,
+) -> Result<ProfileTarget> {
+    let input = Input::<String>::with_theme(theme).with_prompt(prompt);
+    let input = if let Some(default) = default {
+        input.default(default)
+    } else {
+        input
+    };
+    let url = input
         .validate_with(|value: &String| validate_required(value))
         .interact_text()?;
     let parsed = parse_profile_url(&url)?;
@@ -546,9 +760,9 @@ fn pat_instruction_lines(provider: &ProviderKind, base_url: &str) -> Vec<String>
                 .to_string(),
         ],
         ProviderKind::Gitlab => vec![
-            "Create a personal access token with API permissions.".to_string(),
+            "Create a personal access token with API and repository write permissions.".to_string(),
             format!("Open: {url}"),
-            "Select api, create the token, then paste it here.".to_string(),
+            "Select api and write_repository, create the token, then paste it here.".to_string(),
         ],
         ProviderKind::Gitea => vec![
             "Create a personal access token with repository permissions.".to_string(),
@@ -755,6 +969,16 @@ fn endpoint_url(site: &SiteConfig, endpoint: &EndpointConfig) -> String {
     format!("{}/{}", trim_url_scheme(&site.base_url), endpoint.namespace)
 }
 
+fn endpoint_profile_url(config: &Config, endpoint: Option<&EndpointConfig>) -> Option<String> {
+    let endpoint = endpoint?;
+    let site = config.site(&endpoint.site)?;
+    Some(format!(
+        "{}/{}",
+        trim_url_end(&site.base_url),
+        endpoint.namespace
+    ))
+}
+
 fn trim_url_scheme(value: &str) -> String {
     value
         .trim_start_matches("https://")
@@ -852,7 +1076,9 @@ fn token_creation_url(provider: &ProviderKind, base_url: &str) -> String {
     match provider {
         ProviderKind::Github => format!("{base}/settings/tokens"),
         ProviderKind::Gitlab => {
-            format!("{base}/-/user_settings/personal_access_tokens?name=git-sync&scopes=api")
+            format!(
+                "{base}/-/user_settings/personal_access_tokens?name=git-sync&scopes=api,write_repository"
+            )
         }
         ProviderKind::Gitea => format!("{base}/user/settings/applications"),
         ProviderKind::Forgejo => format!("{base}/user/settings/applications"),

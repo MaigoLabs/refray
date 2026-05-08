@@ -25,6 +25,11 @@ where
                 add_sync_group(reader, writer, &mut config)?;
                 write_sync_groups(&config, writer)?;
             }
+            WizardAction::EditSyncGroup => {
+                if edit_sync_group(reader, writer, &mut config)? {
+                    write_sync_groups(&config, writer)?;
+                }
+            }
             WizardAction::DeleteSyncGroup => {
                 if delete_sync_group(reader, writer, &mut config)? {
                     write_sync_groups(&config, writer)?;
@@ -41,22 +46,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut endpoints = Vec::new();
-    let first = prompt_target(reader, writer, "Profile/org URL")?;
-    endpoints.push(ensure_credentials(config, first, reader, writer)?);
-    let second = prompt_target(reader, writer, "Profile/org URL to sync with")?;
-    endpoints.push(ensure_credentials(config, second, reader, writer)?);
-
-    while prompt_bool(
-        reader,
-        writer,
-        "Add a third endpoint for 3-way sync?",
-        false,
-    )? {
-        let next = prompt_target(reader, writer, "Additional profile/org URL")?;
-        endpoints.push(ensure_credentials(config, next, reader, writer)?);
-    }
-
+    let endpoints = prompt_sync_group_endpoints(reader, writer, config, &[])?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
         endpoints,
@@ -66,6 +56,69 @@ where
     });
     prompt_webhook_setup(reader, writer, config)?;
     Ok(())
+}
+
+fn prompt_sync_group_endpoints<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    config: &mut Config,
+    existing: &[EndpointConfig],
+) -> Result<Vec<EndpointConfig>>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut endpoints = Vec::new();
+    let first = prompt_target(
+        reader,
+        writer,
+        "Profile/org URL",
+        endpoint_profile_url(config, existing.first()),
+    )?;
+    endpoints.push(ensure_credentials(config, first, reader, writer)?);
+    let second = prompt_target(
+        reader,
+        writer,
+        "Profile/org URL to sync with",
+        endpoint_profile_url(config, existing.get(1)),
+    )?;
+    endpoints.push(ensure_credentials(config, second, reader, writer)?);
+
+    for (index, endpoint) in existing.iter().enumerate().skip(2) {
+        let Some(default_url) = endpoint_profile_url(config, Some(endpoint)) else {
+            continue;
+        };
+        if !prompt_bool(
+            reader,
+            writer,
+            &format!("Keep endpoint {}?", index + 1),
+            true,
+        )? {
+            continue;
+        }
+        let next = prompt_target(
+            reader,
+            writer,
+            "Additional profile/org URL",
+            Some(default_url),
+        )?;
+        endpoints.push(ensure_credentials(config, next, reader, writer)?);
+    }
+
+    loop {
+        let prompt = if endpoints.len() == 2 {
+            "Add a third endpoint for 3-way sync?"
+        } else {
+            "Add another endpoint to this sync group?"
+        };
+        if !prompt_bool(reader, writer, prompt, false)? {
+            break;
+        }
+        let next = prompt_target(reader, writer, "Additional profile/org URL", None)?;
+        endpoints.push(ensure_credentials(config, next, reader, writer)?);
+    }
+
+    Ok(endpoints)
 }
 
 fn prompt_webhook_setup<R, W>(reader: &mut R, writer: &mut W, config: &mut Config) -> Result<()>
@@ -88,6 +141,7 @@ where
     if !prompt_bool(reader, writer, "Install webhook?", true)? {
         return Ok(());
     }
+    write_webhook_url_instructions(writer)?;
     let url = prompt_required(reader, writer, "Webhook URL reachable by providers")?;
     if let Err(error) = validate_url(&url) {
         bail!(error);
@@ -116,6 +170,34 @@ where
     Ok(())
 }
 
+fn write_webhook_url_instructions<W>(writer: &mut W) -> Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        writer,
+        "Webhook URL must be reachable from every Git provider."
+    )?;
+    writeln!(
+        writer,
+        "Start the receiver with: git-sync serve --listen 127.0.0.1:8787"
+    )?;
+    writeln!(writer, "The receiver accepts: POST / and POST /webhook")?;
+    writeln!(
+        writer,
+        "If running locally, expose it with a tunnel, for example: cloudflared tunnel --url http://127.0.0.1:8787"
+    )?;
+    writeln!(
+        writer,
+        "Then enter the public URL, usually ending in /webhook."
+    )?;
+    writeln!(
+        writer,
+        "During the real wizard, git-sync starts a temporary listener on 127.0.0.1:8787 so you can test the tunnel now."
+    )?;
+    Ok(())
+}
+
 fn prompt_wizard_action<R, W>(reader: &mut R, writer: &mut W) -> Result<WizardAction>
 where
     R: BufRead,
@@ -124,18 +206,57 @@ where
     loop {
         writeln!(writer, "What would you like to do?")?;
         writeln!(writer, "  1. Add another sync group")?;
-        writeln!(writer, "  2. Delete an existing group")?;
-        writeln!(writer, "  3. Done")?;
+        writeln!(writer, "  2. Edit an existing group")?;
+        writeln!(writer, "  3. Delete an existing group")?;
+        writeln!(writer, "  4. Done")?;
         write!(writer, "Choose an option: ")?;
         writer.flush()?;
         let value = read_line(reader)?.trim().to_ascii_lowercase();
         match value.as_str() {
             "1" | "add" | "add another sync group" => return Ok(WizardAction::AddSyncGroup),
-            "2" | "delete" | "delete an existing group" => {
+            "2" | "edit" | "edit an existing group" => return Ok(WizardAction::EditSyncGroup),
+            "3" | "delete" | "delete an existing group" => {
                 return Ok(WizardAction::DeleteSyncGroup);
             }
-            "3" | "done" | "finish" => return Ok(WizardAction::Done),
-            _ => writeln!(writer, "Enter 1, 2, or 3.")?,
+            "4" | "done" | "finish" => return Ok(WizardAction::Done),
+            _ => writeln!(writer, "Enter 1, 2, 3, or 4.")?,
+        }
+    }
+}
+
+fn edit_sync_group<R, W>(reader: &mut R, writer: &mut W, config: &mut Config) -> Result<bool>
+where
+    R: BufRead,
+    W: Write,
+{
+    if config.mirrors.is_empty() {
+        writeln!(writer, "No sync groups to edit.")?;
+        return Ok(false);
+    }
+
+    loop {
+        writeln!(writer, "Edit sync group")?;
+        for (index, option) in sync_group_summaries(config).iter().enumerate() {
+            writeln!(writer, "  {}. {}", index + 1, option)?;
+        }
+        writeln!(writer, "  {}. Back", config.mirrors.len() + 1)?;
+        write!(writer, "Choose a sync group: ")?;
+        writer.flush()?;
+        let value = read_line(reader)?.trim().to_ascii_lowercase();
+        if value == "b" || value == "back" {
+            return Ok(false);
+        }
+        match value.parse::<usize>() {
+            Ok(index) if (1..=config.mirrors.len()).contains(&index) => {
+                let existing = config.mirrors[index - 1].endpoints.clone();
+                let endpoints = prompt_sync_group_endpoints(reader, writer, config, &existing)?;
+                config.mirrors[index - 1].endpoints = endpoints;
+                prompt_webhook_setup(reader, writer, config)?;
+                writeln!(writer, "updated sync group {index}")?;
+                return Ok(true);
+            }
+            Ok(index) if index == config.mirrors.len() + 1 => return Ok(false),
+            _ => writeln!(writer, "Enter a sync group number, or choose Back.")?,
         }
     }
 }
@@ -175,12 +296,20 @@ where
     }
 }
 
-fn prompt_target<R, W>(reader: &mut R, writer: &mut W, prompt: &str) -> Result<ProfileTarget>
+fn prompt_target<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    prompt: &str,
+    default: Option<String>,
+) -> Result<ProfileTarget>
 where
     R: BufRead,
     W: Write,
 {
-    let url = prompt_required(reader, writer, prompt)?;
+    let url = match default {
+        Some(default) => prompt_with_default(reader, writer, prompt, &default)?,
+        None => prompt_required(reader, writer, prompt)?,
+    };
     let parsed = parse_profile_url(&url)?;
     let provider = known_provider_from_host(&parsed.host).unwrap_or_else(|| {
         prompt_provider(reader, writer, &parsed.base_url).expect("provider prompt failed")

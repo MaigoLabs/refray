@@ -43,7 +43,7 @@ Example wizard flow:
 PAT quick setup:
 
 - GitHub: open `https://github.com/settings/tokens`, create a classic PAT with `repo` permissions, then copy the token.
-- GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=git-sync&scopes=api`, create the token, then copy it.
+- GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=git-sync&scopes=api,write_repository`, select `api` and `write_repository`, create the token, then copy it.
 - Gitea: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 - Forgejo: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 
@@ -109,7 +109,7 @@ Use cron or another scheduler for automatic execution:
 
 Webhook mode reduces the window for divergent commits by syncing a repository immediately after a provider sends a push event. It is still conservative: if two endpoints receive independent commits before webhook sync catches up, the normal divergence rules still apply.
 
-The interactive wizard can configure webhooks for you. It asks for the public URL, checks that the URL is reachable from the current machine, creates a webhook secret, and can enable periodic full syncs while `git-sync serve` is running.
+The interactive wizard can configure webhooks for you. During setup it starts a temporary test listener on `127.0.0.1:8787`, asks for the public URL, checks that the URL is reachable from the current machine, creates a webhook secret, and can enable periodic full syncs while `git-sync serve` is running.
 
 Example config:
 

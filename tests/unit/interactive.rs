@@ -12,7 +12,7 @@ fn wizard_builds_sync_group_from_profile_urls() {
         "",
         "n",
         "n",
-        "3",
+        "4",
     ]
     .join("\n")
         + "\n";
@@ -48,6 +48,7 @@ fn wizard_builds_sync_group_from_profile_urls() {
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("1. github.com/hykilpikonna <-> gitea.example.test/azalea"));
     assert!(output.contains("Add another sync group"));
+    assert!(output.contains("Edit an existing group"));
     assert!(output.contains("Delete an existing group"));
     assert!(output.contains("Done"));
 }
@@ -67,7 +68,7 @@ fn wizard_can_build_three_way_sync() {
         "",
         "n",
         "n",
-        "3",
+        "4",
     ]
     .join("\n")
         + "\n";
@@ -95,7 +96,7 @@ fn wizard_can_enable_webhooks() {
         "https://mirror.example.test/webhook",
         "y",
         "30",
-        "3",
+        "4",
     ]
     .join("\n")
         + "\n";
@@ -113,6 +114,12 @@ fn wizard_can_enable_webhooks() {
         webhook.secret,
         TokenConfig::Value("test-webhook-secret".to_string())
     );
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("git-sync serve --listen 127.0.0.1:8787"));
+    assert!(output.contains("cloudflared tunnel --url http://127.0.0.1:8787"));
+    assert!(output.contains("POST / and POST /webhook"));
+    assert!(output.contains("temporary listener on 127.0.0.1:8787"));
 }
 
 #[test]
@@ -136,7 +143,7 @@ fn wizard_reuses_existing_credentials_for_same_instance() {
         "",
         "n",
         "n",
-        "3",
+        "4",
     ]
     .join("\n")
         + "\n";
@@ -191,7 +198,7 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
         }],
         webhook: None,
     };
-    let mut reader = Cursor::new(b"3\n".as_slice());
+    let mut reader = Cursor::new(b"4\n".as_slice());
     let mut output = Vec::new();
 
     let updated = run_config_wizard_with_io(config, &mut reader, &mut output).unwrap();
@@ -201,6 +208,151 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
     assert!(output.contains("1. github.com/alice <-> gitea.example.test/alice"));
     assert!(output.contains("What would you like to do?"));
     assert!(!output.contains("Profile/org URL:"));
+}
+
+#[test]
+fn wizard_edits_existing_sync_group_from_menu() {
+    let config = Config {
+        sites: vec![
+            SiteConfig {
+                name: "github".to_string(),
+                provider: ProviderKind::Github,
+                base_url: "https://github.com".to_string(),
+                api_url: None,
+                token: TokenConfig::Value("existing-gh".to_string()),
+                git_username: None,
+            },
+            SiteConfig {
+                name: "gitea".to_string(),
+                provider: ProviderKind::Gitea,
+                base_url: "https://gitea.example.test".to_string(),
+                api_url: None,
+                token: TokenConfig::Value("existing-gt".to_string()),
+                git_username: None,
+            },
+            SiteConfig {
+                name: "gitlab".to_string(),
+                provider: ProviderKind::Gitlab,
+                base_url: "https://gitlab.com".to_string(),
+                api_url: None,
+                token: TokenConfig::Value("existing-gl".to_string()),
+                git_username: None,
+            },
+        ],
+        mirrors: vec![MirrorConfig {
+            name: "sync-1".to_string(),
+            endpoints: vec![
+                EndpointConfig {
+                    site: "github".to_string(),
+                    kind: NamespaceKind::User,
+                    namespace: "alice".to_string(),
+                },
+                EndpointConfig {
+                    site: "gitea".to_string(),
+                    kind: NamespaceKind::User,
+                    namespace: "alice".to_string(),
+                },
+            ],
+            create_missing: false,
+            visibility: Visibility::Public,
+            allow_force: true,
+        }],
+        webhook: None,
+    };
+    let input = [
+        "2",
+        "1",
+        "https://github.com/bob",
+        "",
+        "https://gitlab.com/bob",
+        "",
+        "n",
+        "n",
+        "4",
+    ]
+    .join("\n")
+        + "\n";
+    let mut reader = Cursor::new(input.as_bytes());
+    let mut output = Vec::new();
+
+    let updated = run_config_wizard_with_io(config, &mut reader, &mut output).unwrap();
+
+    assert_eq!(updated.mirrors.len(), 1);
+    let mirror = &updated.mirrors[0];
+    assert_eq!(mirror.name, "sync-1");
+    assert_eq!(mirror.endpoints.len(), 2);
+    assert_eq!(mirror.endpoints[0].site, "github");
+    assert_eq!(mirror.endpoints[0].namespace, "bob");
+    assert_eq!(mirror.endpoints[1].site, "gitlab");
+    assert_eq!(mirror.endpoints[1].namespace, "bob");
+    assert!(!mirror.create_missing);
+    assert_eq!(mirror.visibility, Visibility::Public);
+    assert!(mirror.allow_force);
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Edit sync group"));
+    assert!(output.contains("updated sync group 1"));
+    assert!(output.contains("github.com/bob <-> gitlab.com/bob"));
+}
+
+#[test]
+fn wizard_prefills_existing_sync_group_when_editing() {
+    let config = Config {
+        sites: vec![
+            SiteConfig {
+                name: "github".to_string(),
+                provider: ProviderKind::Github,
+                base_url: "https://github.com".to_string(),
+                api_url: None,
+                token: TokenConfig::Value("existing-gh".to_string()),
+                git_username: None,
+            },
+            SiteConfig {
+                name: "gitea".to_string(),
+                provider: ProviderKind::Gitea,
+                base_url: "https://gitea.example.test".to_string(),
+                api_url: None,
+                token: TokenConfig::Value("existing-gt".to_string()),
+                git_username: None,
+            },
+        ],
+        mirrors: vec![MirrorConfig {
+            name: "sync-1".to_string(),
+            endpoints: vec![
+                EndpointConfig {
+                    site: "github".to_string(),
+                    kind: NamespaceKind::User,
+                    namespace: "alice".to_string(),
+                },
+                EndpointConfig {
+                    site: "gitea".to_string(),
+                    kind: NamespaceKind::User,
+                    namespace: "alice".to_string(),
+                },
+            ],
+            create_missing: true,
+            visibility: Visibility::Private,
+            allow_force: false,
+        }],
+        webhook: None,
+    };
+    let input = ["2", "1", "", "", "", "", "n", "n", "4"].join("\n") + "\n";
+    let mut reader = Cursor::new(input.as_bytes());
+    let mut output = Vec::new();
+
+    let updated = run_config_wizard_with_io(config, &mut reader, &mut output).unwrap();
+
+    let mirror = &updated.mirrors[0];
+    assert_eq!(mirror.endpoints.len(), 2);
+    assert_eq!(mirror.endpoints[0].site, "github");
+    assert_eq!(mirror.endpoints[0].namespace, "alice");
+    assert_eq!(mirror.endpoints[1].site, "gitea");
+    assert_eq!(mirror.endpoints[1].namespace, "alice");
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Profile/org URL [https://github.com/alice]:"));
+    assert!(output.contains("Profile/org URL to sync with [https://gitea.example.test/alice]:"));
+    assert!(output.contains("updated sync group 1"));
 }
 
 #[test]
@@ -244,7 +396,7 @@ fn wizard_deletes_existing_sync_group_from_menu() {
         }],
         webhook: None,
     };
-    let input = ["2", "1", "3"].join("\n") + "\n";
+    let input = ["3", "1", "4"].join("\n") + "\n";
     let mut reader = Cursor::new(input.as_bytes());
     let mut output = Vec::new();
 
@@ -299,7 +451,7 @@ fn wizard_can_go_back_from_delete_menu() {
         }],
         webhook: None,
     };
-    let input = ["2", "2", "3"].join("\n") + "\n";
+    let input = ["3", "2", "4"].join("\n") + "\n";
     let mut reader = Cursor::new(input.as_bytes());
     let mut output = Vec::new();
 
@@ -373,7 +525,7 @@ fn token_creation_urls_are_provider_specific() {
     );
     assert_eq!(
         token_creation_url(&ProviderKind::Gitlab, "https://gitlab.example.test"),
-        "https://gitlab.example.test/-/user_settings/personal_access_tokens?name=git-sync&scopes=api"
+        "https://gitlab.example.test/-/user_settings/personal_access_tokens?name=git-sync&scopes=api,write_repository"
     );
     assert_eq!(
         token_creation_url(&ProviderKind::Gitea, "gitea.example.test"),
@@ -382,5 +534,19 @@ fn token_creation_urls_are_provider_specific() {
     assert_eq!(
         token_creation_url(&ProviderKind::Forgejo, "forgejo.example.test"),
         "https://forgejo.example.test/user/settings/applications"
+    );
+}
+
+#[test]
+fn demo_webhook_server_answers_reachability_checks() {
+    let server = DemoWebhookServer::start("127.0.0.1:0").unwrap();
+    let response = reqwest::blocking::get(format!("http://{}/webhook", server.listen())).unwrap();
+
+    assert!(response.status().is_success());
+    assert!(
+        response
+            .text()
+            .unwrap()
+            .contains("git-sync webhook setup listener")
     );
 }
