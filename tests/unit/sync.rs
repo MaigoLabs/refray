@@ -175,6 +175,140 @@ fn branch_deletion_decisions_ignore_internal_conflict_branches() {
 }
 
 #[test]
+fn repo_deletion_decision_propagates_previous_synced_repo_deletion() {
+    let mirror = test_mirror();
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "github_alice".to_string(),
+        remote_ref_state("a", &[("main", "111")]),
+    );
+    previous.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+    let mut current = BTreeMap::new();
+    current.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+
+    let decision = repo_deletion_decision(
+        &mirror,
+        &[endpoint_repo("gitea")],
+        Some(&previous),
+        &current,
+    );
+
+    assert_eq!(
+        decision,
+        RepoDeletionDecision::Propagate {
+            deleted_remotes: vec!["github_alice".to_string()],
+            target_remotes: vec!["gitea_alice".to_string()],
+        }
+    );
+}
+
+#[test]
+fn repo_deletion_decision_conflicts_when_remaining_repo_changed() {
+    let mirror = test_mirror();
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "github_alice".to_string(),
+        remote_ref_state("a", &[("main", "111")]),
+    );
+    previous.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+    let mut current = BTreeMap::new();
+    current.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("changed", &[("main", "222")]),
+    );
+
+    let decision = repo_deletion_decision(
+        &mirror,
+        &[endpoint_repo("gitea")],
+        Some(&previous),
+        &current,
+    );
+
+    assert_eq!(
+        decision,
+        RepoDeletionDecision::Conflict {
+            deleted_remotes: vec!["github_alice".to_string()],
+            changed_remotes: vec!["gitea_alice".to_string()],
+        }
+    );
+}
+
+#[test]
+fn repo_deletion_decision_removes_state_when_deleted_everywhere() {
+    let mirror = test_mirror();
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "github_alice".to_string(),
+        remote_ref_state("a", &[("main", "111")]),
+    );
+    previous.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+
+    let decision = repo_deletion_decision(&mirror, &[], Some(&previous), &BTreeMap::new());
+
+    assert_eq!(
+        decision,
+        RepoDeletionDecision::DeletedEverywhere {
+            deleted_remotes: vec!["github_alice".to_string(), "gitea_alice".to_string()],
+        }
+    );
+}
+
+#[test]
+fn repo_deletion_decision_removes_partial_state_when_deleted_everywhere() {
+    let mirror = test_mirror();
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+
+    let decision = repo_deletion_decision(&mirror, &[], Some(&previous), &BTreeMap::new());
+
+    assert_eq!(
+        decision,
+        RepoDeletionDecision::DeletedEverywhere {
+            deleted_remotes: vec!["github_alice".to_string(), "gitea_alice".to_string()],
+        }
+    );
+}
+
+#[test]
+fn repo_deletion_decision_ignores_repos_not_previously_synced_everywhere() {
+    let mirror = test_mirror();
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+    let mut current = BTreeMap::new();
+    current.insert(
+        "gitea_alice".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+
+    let decision = repo_deletion_decision(
+        &mirror,
+        &[endpoint_repo("gitea")],
+        Some(&previous),
+        &current,
+    );
+
+    assert_eq!(decision, RepoDeletionDecision::None);
+}
+
+#[test]
 fn conflict_branch_prefixes_are_reversible_not_slug_collisions() {
     let slash_branch = conflict_pr_branch_prefix("release/foo");
     let dash_branch = conflict_pr_branch_prefix("release-foo");
@@ -218,4 +352,35 @@ fn test_remotes() -> Vec<RemoteSpec> {
             display: "gitea:alice:User".to_string(),
         },
     ]
+}
+
+fn test_mirror() -> MirrorConfig {
+    MirrorConfig {
+        name: "sync-1".to_string(),
+        endpoints: vec![endpoint("github"), endpoint("gitea")],
+        create_missing: true,
+        visibility: crate::config::Visibility::Private,
+        allow_force: false,
+        conflict_resolution: ConflictResolutionStrategy::Fail,
+    }
+}
+
+fn endpoint(site: &str) -> EndpointConfig {
+    EndpointConfig {
+        site: site.to_string(),
+        kind: crate::config::NamespaceKind::User,
+        namespace: "alice".to_string(),
+    }
+}
+
+fn endpoint_repo(site: &str) -> EndpointRepo {
+    EndpointRepo {
+        endpoint: endpoint(site),
+        repo: crate::provider::RemoteRepo {
+            name: "repo".to_string(),
+            clone_url: format!("https://{site}.invalid/alice/repo.git"),
+            private: true,
+            description: None,
+        },
+    }
 }

@@ -178,19 +178,24 @@ fn sync_group(
     }
 
     let mut repos = repos_by_name(all_endpoint_repos);
-    let all_repo_count = repos.len();
     let retry_repo_names = context
         .retry_failed_repos
         .and_then(|repos| repos.get(&mirror.name));
-    let repo_names = repos
+    let tracked_repo_names = context.ref_state.repo_names(&mirror.name);
+    let all_repo_names = repos
         .keys()
+        .cloned()
+        .chain(tracked_repo_names)
+        .collect::<BTreeSet<_>>();
+    let all_repo_count = all_repo_names.len();
+    let repo_names = all_repo_names
+        .into_iter()
         .filter(|name| {
             context
                 .repo_pattern
                 .is_none_or(|pattern| pattern.is_match(name))
                 && retry_repo_names.is_none_or(|repos| repos.contains(name.as_str()))
         })
-        .cloned()
         .collect::<BTreeSet<_>>();
     if repo_names.is_empty() {
         if let Some(retry_repo_names) = retry_repo_names {
@@ -314,10 +319,19 @@ fn sync_group(
         for result in receiver {
             match result {
                 Ok(success) => {
-                    if let Some(refs) = success.outcome.ref_update {
-                        context
-                            .ref_state
-                            .set_repo(&mirror.name, &success.repo_name, refs);
+                    if let Some(update) = success.outcome.state_update {
+                        match update {
+                            RepoStateUpdate::Set(refs) => {
+                                context
+                                    .ref_state
+                                    .set_repo(&mirror.name, &success.repo_name, refs);
+                            }
+                            RepoStateUpdate::Remove => {
+                                context
+                                    .ref_state
+                                    .remove_repo(&mirror.name, &success.repo_name);
+                            }
+                        }
                     }
                 }
                 Err(failure) => {
@@ -481,7 +495,12 @@ struct RepoSyncContext<'a> {
 
 #[derive(Default)]
 struct RepoSyncOutcome {
-    ref_update: Option<BTreeMap<String, RemoteRefState>>,
+    state_update: Option<RepoStateUpdate>,
+}
+
+enum RepoStateUpdate {
+    Set(BTreeMap<String, RemoteRefState>),
+    Remove,
 }
 
 fn sync_repo(
@@ -497,19 +516,31 @@ fn sync_repo(
         style("Repo").magenta().bold(),
         style(repo_name).bold()
     );
+    let previous_repo_refs = ref_state.repo(&context.mirror.name, repo_name);
     if repos.is_empty() {
-        crate::logln!(
-            "  {} {}",
-            style("skip").yellow().bold(),
-            style("repository not found on any endpoint").dim()
-        );
-        return Ok(RepoSyncOutcome::default());
+        return handle_repo_deletion(
+            context,
+            repo_name,
+            repos,
+            previous_repo_refs,
+            &BTreeMap::new(),
+        )
+        .map(|outcome| outcome.unwrap_or_default());
     }
 
     let initial_remotes = remote_specs(context, repos)?;
     let Some(initial_ref_state) = check_remote_refs(context, repo_name, &initial_remotes)? else {
         return Ok(RepoSyncOutcome::default());
     };
+    if let Some(outcome) = handle_repo_deletion(
+        context,
+        repo_name,
+        repos,
+        previous_repo_refs,
+        &initial_ref_state,
+    )? {
+        return Ok(outcome);
+    }
     let all_endpoints_present = all_configured_endpoints_present(context.mirror, repos);
     if !context.dry_run
         && all_endpoints_present
@@ -539,7 +570,7 @@ fn sync_repo(
             style("up-to-date").green().bold()
         );
         return Ok(RepoSyncOutcome {
-            ref_update: Some(initial_ref_state),
+            state_update: Some(RepoStateUpdate::Set(initial_ref_state)),
         });
     }
 
@@ -606,8 +637,7 @@ fn sync_repo(
         &mirror_repo,
         &remotes,
         repos,
-        detailed_repo_ref_state(ref_state.repo(&context.mirror.name, repo_name))
-            .or(cached_ref_state.as_ref()),
+        detailed_repo_ref_state(previous_repo_refs).or(cached_ref_state.as_ref()),
         &initial_ref_state,
     )?;
     if !context.dry_run && !result.had_conflicts {
@@ -620,10 +650,115 @@ fn sync_repo(
             initial_ref_state
         };
         return Ok(RepoSyncOutcome {
-            ref_update: Some(refs),
+            state_update: Some(RepoStateUpdate::Set(refs)),
         });
     }
     Ok(RepoSyncOutcome::default())
+}
+
+fn handle_repo_deletion(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    repos: &[EndpointRepo],
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<Option<RepoSyncOutcome>> {
+    match repo_deletion_decision(context.mirror, repos, previous_refs, current_refs) {
+        RepoDeletionDecision::None => {
+            if repos.is_empty() {
+                crate::logln!(
+                    "  {} {}",
+                    style("skip").yellow().bold(),
+                    style("repository not found on any endpoint").dim()
+                );
+                return Ok(Some(RepoSyncOutcome::default()));
+            }
+            Ok(None)
+        }
+        RepoDeletionDecision::DeletedEverywhere { deleted_remotes } => {
+            crate::logln!(
+                "  {} {} deleted on {}",
+                style("deleted repo").red().bold(),
+                style(repo_name).cyan(),
+                deleted_remotes.join("+")
+            );
+            Ok(Some(RepoSyncOutcome {
+                state_update: (!context.dry_run).then_some(RepoStateUpdate::Remove),
+            }))
+        }
+        RepoDeletionDecision::Propagate {
+            deleted_remotes,
+            target_remotes,
+        } => {
+            crate::logln!(
+                "  {} {} deleted on {} -> {}",
+                style("deleted repo").red().bold(),
+                style(repo_name).cyan(),
+                deleted_remotes.join("+"),
+                target_remotes.join("+")
+            );
+            delete_repos(context, repo_name, repos, &target_remotes)?;
+            Ok(Some(RepoSyncOutcome {
+                state_update: (!context.dry_run).then_some(RepoStateUpdate::Remove),
+            }))
+        }
+        RepoDeletionDecision::Conflict {
+            deleted_remotes,
+            changed_remotes,
+        } => {
+            crate::logln!(
+                "  {} repo {} was deleted on {} but changed on {} ({})",
+                style("conflict").yellow().bold(),
+                style(repo_name).cyan(),
+                deleted_remotes.join("+"),
+                changed_remotes.join("+"),
+                style("skipped").dim()
+            );
+            fail_on_unresolved_conflict(context, "repo deletion conflict")?;
+            Ok(Some(RepoSyncOutcome::default()))
+        }
+    }
+}
+
+fn delete_repos(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    repos: &[EndpointRepo],
+    target_remotes: &[String],
+) -> Result<()> {
+    for repo in repos {
+        let remote_name = remote_name_for_endpoint_repo(repo);
+        if !target_remotes.contains(&remote_name) {
+            continue;
+        }
+        crate::logln!(
+            "  {} {} {}",
+            style(if context.dry_run {
+                "would delete"
+            } else {
+                "delete"
+            })
+            .red()
+            .bold(),
+            style(repo_name).cyan(),
+            style(format!("from {}", repo.endpoint.label())).dim()
+        );
+        if context.dry_run {
+            continue;
+        }
+        let site = context.config.site(&repo.endpoint.site).unwrap();
+        let client = ProviderClient::new(site)?;
+        client
+            .delete_repo(&repo.endpoint, repo_name)
+            .with_context(|| {
+                format!(
+                    "failed to delete {} from {}",
+                    repo_name,
+                    repo.endpoint.label()
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn all_configured_endpoints_present(mirror: &MirrorConfig, repos: &[EndpointRepo]) -> bool {
@@ -1145,10 +1280,11 @@ fn endpoint_repos_by_remote_name<'a>(
 }
 
 fn remote_name_for_endpoint_repo(endpoint_repo: &EndpointRepo) -> String {
-    safe_remote_name(&format!(
-        "{}_{}",
-        endpoint_repo.endpoint.site, endpoint_repo.endpoint.namespace
-    ))
+    remote_name_for_endpoint(&endpoint_repo.endpoint)
+}
+
+fn remote_name_for_endpoint(endpoint: &EndpointConfig) -> String {
+    safe_remote_name(&format!("{}_{}", endpoint.site, endpoint.namespace))
 }
 
 fn branch_names(branches: &[crate::git::BranchDecision]) -> BTreeSet<String> {
@@ -1330,6 +1466,88 @@ fn branch_deletion_decisions(
     }
 
     (deletions, conflicts, blocked)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RepoDeletionDecision {
+    None,
+    DeletedEverywhere {
+        deleted_remotes: Vec<String>,
+    },
+    Propagate {
+        deleted_remotes: Vec<String>,
+        target_remotes: Vec<String>,
+    },
+    Conflict {
+        deleted_remotes: Vec<String>,
+        changed_remotes: Vec<String>,
+    },
+}
+
+fn repo_deletion_decision(
+    mirror: &MirrorConfig,
+    repos: &[EndpointRepo],
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> RepoDeletionDecision {
+    let Some(previous_refs) = previous_refs else {
+        return RepoDeletionDecision::None;
+    };
+    let remote_names = mirror
+        .endpoints
+        .iter()
+        .map(remote_name_for_endpoint)
+        .collect::<Vec<_>>();
+    if remote_names.is_empty() {
+        return RepoDeletionDecision::None;
+    }
+
+    let present_remotes = repos
+        .iter()
+        .map(remote_name_for_endpoint_repo)
+        .collect::<BTreeSet<_>>();
+    if present_remotes.len() == remote_names.len() {
+        return RepoDeletionDecision::None;
+    }
+
+    let deleted_remotes = remote_names
+        .iter()
+        .filter(|remote| !present_remotes.contains(remote.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let target_remotes = remote_names
+        .iter()
+        .filter(|remote| present_remotes.contains(remote.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if target_remotes.is_empty() {
+        return RepoDeletionDecision::DeletedEverywhere { deleted_remotes };
+    }
+
+    if remote_names
+        .iter()
+        .any(|remote| !previous_refs.contains_key(remote))
+    {
+        return RepoDeletionDecision::None;
+    }
+
+    let changed_remotes = target_remotes
+        .iter()
+        .filter(|remote| current_refs.get(remote.as_str()) != previous_refs.get(remote.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if changed_remotes.is_empty() {
+        RepoDeletionDecision::Propagate {
+            deleted_remotes,
+            target_remotes,
+        }
+    } else {
+        RepoDeletionDecision::Conflict {
+            deleted_remotes,
+            changed_remotes,
+        }
+    }
 }
 
 struct RepoRefSyncResult {
