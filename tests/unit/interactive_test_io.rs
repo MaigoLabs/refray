@@ -41,6 +41,22 @@ where
     Ok(config)
 }
 
+pub fn prompt_run_full_sync_now_with_io<R, W>(
+    config: &Config,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<bool>
+where
+    R: BufRead,
+    W: Write,
+{
+    if config.mirrors.is_empty() {
+        return Ok(false);
+    }
+
+    prompt_bool(reader, writer, "Run full sync now?", false)
+}
+
 fn add_sync_group<R, W>(reader: &mut R, writer: &mut W, config: &mut Config) -> Result<()>
 where
     R: BufRead,

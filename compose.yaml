@@ -1,0 +1,14 @@
+services:
+  refray:
+    build: .
+    image: refray:local
+    command: ["serve", "--listen", "0.0.0.0:8787"]
+    ports:
+      - "8787:8787"
+    volumes:
+      - refray-data:/data
+    restart: unless-stopped
+
+volumes:
+  refray-data:
+    name: refray-data

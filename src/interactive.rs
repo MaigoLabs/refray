@@ -37,7 +37,7 @@ struct ParsedProfileUrl {
     namespace: String,
 }
 
-pub fn run_config_wizard(path: &Path) -> Result<()> {
+pub fn run_config_wizard(path: &Path) -> Result<ConfigWizardOutcome> {
     let existing_config = path.exists();
     let mut config = Config::load_or_default(path)?;
     let theme = ColorfulTheme::default();
@@ -85,7 +85,17 @@ pub fn run_config_wizard(path: &Path) -> Result<()> {
         style("saved").green().bold(),
         style(path.display()).cyan()
     );
-    Ok(())
+    let run_full_sync_now = prompt_run_full_sync_now_styled(&config, &theme)?;
+    Ok(ConfigWizardOutcome {
+        config,
+        run_full_sync_now,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigWizardOutcome {
+    pub config: Config,
+    pub run_full_sync_now: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -387,6 +397,19 @@ fn prompt_wizard_action_styled(theme: &ColorfulTheme) -> Result<WizardAction> {
         2 => WizardAction::DeleteSyncGroup,
         _ => WizardAction::Done,
     })
+}
+
+fn prompt_run_full_sync_now_styled(config: &Config, theme: &ColorfulTheme) -> Result<bool> {
+    if config.mirrors.is_empty() {
+        return Ok(false);
+    }
+
+    println!();
+    Confirm::with_theme(theme)
+        .with_prompt("Run full sync now?")
+        .default(false)
+        .interact()
+        .map_err(Into::into)
 }
 
 fn edit_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<bool> {
