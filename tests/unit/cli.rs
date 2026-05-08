@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn cli_config_opens_wizard() {
-    let cli = Cli::try_parse_from(["git-sync", "config"]).unwrap();
+    let cli = Cli::try_parse_from(["refray", "config"]).unwrap();
 
     assert!(matches!(cli.command, Command::Config));
 }
@@ -10,11 +10,11 @@ fn cli_config_opens_wizard() {
 #[test]
 fn cli_rejects_removed_config_subcommands() {
     for args in [
-        ["git-sync", "config", "wizard"].as_slice(),
-        ["git-sync", "config", "init"].as_slice(),
-        ["git-sync", "config", "show"].as_slice(),
-        ["git-sync", "config", "site", "list"].as_slice(),
-        ["git-sync", "config", "mirror", "list"].as_slice(),
+        ["refray", "config", "wizard"].as_slice(),
+        ["refray", "config", "init"].as_slice(),
+        ["refray", "config", "show"].as_slice(),
+        ["refray", "config", "site", "list"].as_slice(),
+        ["refray", "config", "mirror", "list"].as_slice(),
     ] {
         assert!(Cli::try_parse_from(args).is_err());
     }
@@ -23,7 +23,7 @@ fn cli_rejects_removed_config_subcommands() {
 #[test]
 fn cli_accepts_sync_repo_pattern() {
     let cli = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "sync",
         "--repo-pattern",
         "^(foo|bar)-",
@@ -40,7 +40,7 @@ fn cli_accepts_sync_repo_pattern() {
 
 #[test]
 fn cli_accepts_sync_retry_failed() {
-    let cli = Cli::try_parse_from(["git-sync", "sync", "--retry-failed"]).unwrap();
+    let cli = Cli::try_parse_from(["refray", "sync", "--retry-failed"]).unwrap();
 
     let Command::Sync(args) = cli.command else {
         panic!("parsed unexpected command");
@@ -50,7 +50,7 @@ fn cli_accepts_sync_retry_failed() {
 
 #[test]
 fn cli_accepts_sync_jobs() {
-    let cli = Cli::try_parse_from(["git-sync", "sync", "--jobs", "8"]).unwrap();
+    let cli = Cli::try_parse_from(["refray", "sync", "--jobs", "8"]).unwrap();
 
     let Command::Sync(args) = cli.command else {
         panic!("parsed unexpected command");
@@ -61,7 +61,7 @@ fn cli_accepts_sync_jobs() {
 #[test]
 fn cli_accepts_webhook_serve() {
     let cli = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "serve",
         "--listen",
         "127.0.0.1:9000",
@@ -86,7 +86,7 @@ fn cli_accepts_webhook_serve() {
 #[test]
 fn cli_accepts_webhook_install() {
     let cli = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "webhook",
         "install",
         "repo-one",
@@ -118,7 +118,7 @@ fn cli_accepts_webhook_install() {
 #[test]
 fn cli_accepts_webhook_install_repo_pattern() {
     let cli = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "webhook",
         "install",
         "--url",
@@ -140,7 +140,7 @@ fn cli_accepts_webhook_install_repo_pattern() {
 #[test]
 fn cli_accepts_webhook_uninstall() {
     let cli = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "webhook",
         "uninstall",
         "repo-one",
@@ -170,7 +170,7 @@ fn cli_accepts_webhook_uninstall() {
 #[test]
 fn cli_accepts_webhook_update() {
     let cli = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "webhook",
         "update",
         "--url",
@@ -193,7 +193,7 @@ fn cli_accepts_webhook_update() {
 #[test]
 fn cli_rejects_scoped_webhook_update() {
     let result = Cli::try_parse_from([
-        "git-sync",
+        "refray",
         "webhook",
         "update",
         "repo-one",

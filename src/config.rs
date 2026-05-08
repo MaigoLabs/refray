@@ -7,6 +7,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+const APP_NAME: &str = "refray";
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -223,15 +225,15 @@ impl EndpointConfig {
 }
 
 pub fn default_config_path() -> PathBuf {
-    ProjectDirs::from("dev", "git-sync", "git-sync")
+    ProjectDirs::from("dev", APP_NAME, APP_NAME)
         .map(|dirs| dirs.config_dir().join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from("git-sync.toml"))
+        .unwrap_or_else(|| PathBuf::from("refray.toml"))
 }
 
 pub fn default_work_dir() -> PathBuf {
-    ProjectDirs::from("dev", "git-sync", "git-sync")
+    ProjectDirs::from("dev", APP_NAME, APP_NAME)
         .map(|dirs| dirs.cache_dir().join("mirrors"))
-        .unwrap_or_else(|| PathBuf::from(".git-sync-cache"))
+        .unwrap_or_else(|| PathBuf::from(".refray-cache"))
 }
 
 fn trim_end(value: &str) -> &str {

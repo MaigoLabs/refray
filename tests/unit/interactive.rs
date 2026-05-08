@@ -123,7 +123,7 @@ fn wizard_can_enable_webhooks() {
     );
 
     let output = String::from_utf8(output).unwrap();
-    assert!(output.contains("git-sync serve --listen 127.0.0.1:8787"));
+    assert!(output.contains("refray serve --listen 127.0.0.1:8787"));
     assert!(output.contains("cloudflared tunnel --url http://127.0.0.1:8787"));
     assert!(output.contains("POST / and POST /webhook"));
     assert!(output.contains("temporary listener on 127.0.0.1:8787"));
@@ -539,7 +539,7 @@ fn token_creation_urls_are_provider_specific() {
     );
     assert_eq!(
         token_creation_url(&ProviderKind::Gitlab, "https://gitlab.example.test"),
-        "https://gitlab.example.test/-/user_settings/personal_access_tokens?name=git-sync&scopes=api,write_repository"
+        "https://gitlab.example.test/-/user_settings/personal_access_tokens?name=refray&scopes=api,write_repository"
     );
     assert_eq!(
         token_creation_url(&ProviderKind::Gitea, "gitea.example.test"),
@@ -561,6 +561,6 @@ fn demo_webhook_server_answers_reachability_checks() {
         response
             .text()
             .unwrap()
-            .contains("git-sync webhook setup listener")
+            .contains("refray webhook setup listener")
     );
 }

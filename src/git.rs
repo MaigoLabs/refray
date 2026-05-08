@@ -649,9 +649,9 @@ impl GitMirror {
                 "-C",
                 worktree.to_str().unwrap(),
                 "-c",
-                "user.name=git-sync",
+                "user.name=refray",
                 "-c",
-                "user.email=git-sync@example.invalid",
+                "user.email=refray@example.invalid",
             ]
             .into_iter()
             .chain(args),

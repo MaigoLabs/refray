@@ -848,7 +848,7 @@ impl<'a> ProviderClient<'a> {
         request: reqwest::blocking::RequestBuilder,
     ) -> Result<reqwest::blocking::RequestBuilder> {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("git-sync/0.1"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("refray/0.1"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         match self.site.provider {
             ProviderKind::Github => {

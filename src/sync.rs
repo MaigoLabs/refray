@@ -35,7 +35,7 @@ use self::state::{
 };
 
 pub const DEFAULT_JOBS: usize = 4;
-const CONFLICT_BRANCH_ROOT: &str = "git-sync/conflicts/";
+const CONFLICT_BRANCH_ROOT: &str = "refray/conflicts/";
 
 #[derive(Clone, Debug)]
 pub struct SyncOptions {
@@ -1018,11 +1018,11 @@ fn open_conflict_pull_requests(
                 };
                 mirror_repo.push_branch_updates(remotes, &[update])?;
                 let title = format!(
-                    "Resolve git-sync conflict: {} from {}",
+                    "Resolve refray conflict: {} from {}",
                     conflict.branch, source_remote
                 );
                 let body = format!(
-                    "git-sync detected divergent branch tips and opened this pull request to merge {}@{} into {}@{}.",
+                    "refray detected divergent branch tips and opened this pull request to merge {}@{} into {}@{}.",
                     source_remote,
                     short_sha(source_sha),
                     target_remote,

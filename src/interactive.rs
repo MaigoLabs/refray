@@ -43,11 +43,11 @@ pub fn run_config_wizard(path: &Path) -> Result<()> {
     let theme = ColorfulTheme::default();
 
     println!();
-    println!("{}", style("git-sync configuration wizard").cyan().bold());
+    println!("{}", style("refray configuration wizard").cyan().bold());
     let description = if existing_config {
         "Review, add, edit, or delete sync groups."
     } else {
-        "Enter profile or organization URLs, then git-sync will build the mirror group."
+        "Enter profile or organization URLs, then refray will build the mirror group."
     };
     println!("{}", style(description).dim());
     println!();
@@ -214,7 +214,7 @@ fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Re
                 style(DEFAULT_WEBHOOK_LISTEN).bold()
             );
             println!(
-                "  {} If git-sync serve is already running there, you can continue.",
+                "  {} If refray serve is already running there, you can continue.",
                 style("-").yellow()
             );
             None
@@ -280,7 +280,7 @@ fn print_webhook_url_instructions() {
     println!(
         "  {} Start the receiver with: {}",
         style("-").cyan(),
-        style(format!("git-sync serve --listen {DEFAULT_WEBHOOK_LISTEN}")).bold()
+        style(format!("refray serve --listen {DEFAULT_WEBHOOK_LISTEN}")).bold()
     );
     println!(
         "  {} The receiver accepts: {} and {}",
@@ -360,7 +360,7 @@ fn respond_demo_webhook_request(request: Request) {
     let (status, body) = if path == "/" || path == "/webhook" {
         (
             StatusCode(200),
-            "git-sync webhook setup listener\nThis temporary server only confirms that your public URL reaches this machine.\nAfter saving config, run git-sync serve for real webhooks.\n",
+            "refray webhook setup listener\nThis temporary server only confirms that your public URL reaches this machine.\nAfter saving config, run refray serve for real webhooks.\n",
         )
     } else {
         (StatusCode(404), "not found\n")
@@ -706,7 +706,7 @@ fn prompt_conflict_resolution_styled(
     ];
     let default = existing.map(conflict_resolution_index).unwrap_or(3);
     let index = Select::with_theme(theme)
-        .with_prompt("How should git-sync resolve branch conflicts?")
+        .with_prompt("How should refray resolve branch conflicts?")
         .items(options)
         .default(default)
         .interact()?;
@@ -1136,7 +1136,7 @@ fn token_creation_url(provider: &ProviderKind, base_url: &str) -> String {
         ProviderKind::Github => format!("{base}/settings/tokens"),
         ProviderKind::Gitlab => {
             format!(
-                "{base}/-/user_settings/personal_access_tokens?name=git-sync&scopes=api,write_repository"
+                "{base}/-/user_settings/personal_access_tokens?name=refray&scopes=api,write_repository"
             )
         }
         ProviderKind::Gitea => format!("{base}/user/settings/applications"),

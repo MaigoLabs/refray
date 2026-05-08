@@ -11,7 +11,7 @@ where
     R: BufRead,
     W: Write,
 {
-    writeln!(writer, "git-sync configuration wizard")?;
+    writeln!(writer, "refray configuration wizard")?;
     if config.mirrors.is_empty() {
         add_sync_group(reader, writer, &mut config)?;
         write_sync_groups(&config, writer)?;
@@ -182,7 +182,7 @@ where
     )?;
     writeln!(
         writer,
-        "Start the receiver with: git-sync serve --listen 127.0.0.1:8787"
+        "Start the receiver with: refray serve --listen 127.0.0.1:8787"
     )?;
     writeln!(writer, "The receiver accepts: POST / and POST /webhook")?;
     writeln!(
@@ -195,7 +195,7 @@ where
     )?;
     writeln!(
         writer,
-        "During the real wizard, git-sync starts a temporary listener on 127.0.0.1:8787 so you can test the tunnel now."
+        "During the real wizard, refray starts a temporary listener on 127.0.0.1:8787 so you can test the tunnel now."
     )?;
     Ok(())
 }
@@ -431,7 +431,7 @@ where
         .map(conflict_resolution_value)
         .unwrap_or("auto-rebase + pull-request");
     loop {
-        writeln!(writer, "How should git-sync resolve branch conflicts?")?;
+        writeln!(writer, "How should refray resolve branch conflicts?")?;
         writeln!(writer, "  1. fail")?;
         writeln!(writer, "  2. auto-rebase and fail on file conflict")?;
         writeln!(writer, "  3. pull-request")?;
