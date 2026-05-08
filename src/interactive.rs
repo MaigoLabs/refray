@@ -9,13 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use console::{Term, style};
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
+use regex::Regex;
 use reqwest::blocking::Client;
 use tiny_http::{Request, Response, Server, StatusCode};
 use url::Url;
 
 use crate::config::{
     Config, ConflictResolutionStrategy, EndpointConfig, MirrorConfig, NamespaceKind, ProviderKind,
-    SiteConfig, TokenConfig, Visibility, WebhookConfig,
+    SiteConfig, SyncVisibility, TokenConfig, Visibility, WebhookConfig,
 };
 use crate::provider::ProviderClient;
 use crate::webhook::check_webhook_url_reachable;
@@ -35,6 +36,12 @@ struct ParsedProfileUrl {
     base_url: String,
     host: String,
     namespace: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RepoFilterInput {
+    whitelist: Vec<String>,
+    blacklist: Vec<String>,
 }
 
 pub fn run_config_wizard(path: &Path) -> Result<ConfigWizardOutcome> {
@@ -108,10 +115,15 @@ enum WizardAction {
 
 fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<()> {
     let endpoints = prompt_sync_group_endpoints_styled(config, theme, &[])?;
+    let sync_visibility = prompt_sync_visibility_styled(theme, None)?;
+    let repo_filters = prompt_repo_filters_styled(theme, None)?;
     let conflict_resolution = prompt_conflict_resolution_styled(theme, None)?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
         endpoints,
+        sync_visibility,
+        repo_whitelist: repo_filters.whitelist,
+        repo_blacklist: repo_filters.blacklist,
         create_missing: true,
         visibility: Visibility::Private,
         allow_force: false,
@@ -435,11 +447,23 @@ fn edit_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<
         style(format!("sync group {}", index + 1)).cyan()
     );
     let existing = config.mirrors[index].endpoints.clone();
+    let existing_sync_visibility = config.mirrors[index].sync_visibility.clone();
+    let existing_repo_whitelist = config.mirrors[index].repo_whitelist.clone();
+    let existing_repo_blacklist = config.mirrors[index].repo_blacklist.clone();
     let existing_conflict_resolution = config.mirrors[index].conflict_resolution.clone();
     let endpoints = prompt_sync_group_endpoints_styled(config, theme, &existing)?;
+    let sync_visibility = prompt_sync_visibility_styled(theme, Some(&existing_sync_visibility))?;
+    let existing_repo_filters = RepoFilterInput {
+        whitelist: existing_repo_whitelist,
+        blacklist: existing_repo_blacklist,
+    };
+    let repo_filters = prompt_repo_filters_styled(theme, Some(&existing_repo_filters))?;
     let conflict_resolution =
         prompt_conflict_resolution_styled(theme, Some(&existing_conflict_resolution))?;
     config.mirrors[index].endpoints = endpoints;
+    config.mirrors[index].sync_visibility = sync_visibility;
+    config.mirrors[index].repo_whitelist = repo_filters.whitelist;
+    config.mirrors[index].repo_blacklist = repo_filters.blacklist;
     config.mirrors[index].conflict_resolution = conflict_resolution;
     prompt_webhook_setup_styled(config, theme)?;
     println!(
@@ -736,6 +760,102 @@ fn prompt_conflict_resolution_styled(
     Ok(conflict_resolution_from_index(index))
 }
 
+fn prompt_sync_visibility_styled(
+    theme: &ColorfulTheme,
+    existing: Option<&SyncVisibility>,
+) -> Result<SyncVisibility> {
+    let options = [
+        "All repositories",
+        "Only private repositories",
+        "Only public repositories",
+    ];
+    let default = existing.map(sync_visibility_index).unwrap_or(0);
+    let index = Select::with_theme(theme)
+        .with_prompt("Which repositories should this sync group include?")
+        .items(options)
+        .default(default)
+        .interact()?;
+    Ok(sync_visibility_from_index(index))
+}
+
+fn prompt_repo_filters_styled(
+    theme: &ColorfulTheme,
+    existing: Option<&RepoFilterInput>,
+) -> Result<RepoFilterInput> {
+    let existing = existing.cloned().unwrap_or_default();
+    let has_existing = !existing.whitelist.is_empty() || !existing.blacklist.is_empty();
+    if !Confirm::with_theme(theme)
+        .with_prompt("Configure repository name whitelist/blacklist?")
+        .default(has_existing)
+        .interact()?
+    {
+        return Ok(RepoFilterInput::default());
+    }
+
+    Ok(RepoFilterInput {
+        whitelist: prompt_repo_pattern_list_styled(
+            theme,
+            "Whitelist regexes (comma-separated, empty means all repo names)",
+            &existing.whitelist,
+        )?,
+        blacklist: prompt_repo_pattern_list_styled(
+            theme,
+            "Blacklist regexes (comma-separated)",
+            &existing.blacklist,
+        )?,
+    })
+}
+
+fn prompt_repo_pattern_list_styled(
+    theme: &ColorfulTheme,
+    prompt: &str,
+    existing: &[String],
+) -> Result<Vec<String>> {
+    let input = Input::<String>::with_theme(theme)
+        .with_prompt(prompt)
+        .allow_empty(true)
+        .validate_with(|value: &String| validate_repo_pattern_list(value));
+    let input = if existing.is_empty() {
+        input
+    } else {
+        input.default(existing.join(", "))
+    };
+    let value = input.interact_text()?;
+    Ok(parse_repo_pattern_list(&value))
+}
+
+fn validate_repo_pattern_list(value: &str) -> std::result::Result<(), String> {
+    for pattern in parse_repo_pattern_list(value) {
+        Regex::new(&pattern).map_err(|error| format!("invalid regex '{pattern}': {error}"))?;
+    }
+    Ok(())
+}
+
+fn parse_repo_pattern_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn sync_visibility_index(sync_visibility: &SyncVisibility) -> usize {
+    match sync_visibility {
+        SyncVisibility::All => 0,
+        SyncVisibility::Private => 1,
+        SyncVisibility::Public => 2,
+    }
+}
+
+fn sync_visibility_from_index(index: usize) -> SyncVisibility {
+    match index {
+        1 => SyncVisibility::Private,
+        2 => SyncVisibility::Public,
+        _ => SyncVisibility::All,
+    }
+}
+
 fn conflict_resolution_index(strategy: &ConflictResolutionStrategy) -> usize {
     match strategy {
         ConflictResolutionStrategy::Fail => 0,
@@ -803,10 +923,31 @@ fn sync_group_summary(config: &Config, mirror: &MirrorConfig) -> String {
         .collect::<Vec<_>>()
         .join(" <-> ");
     format!(
-        "{} ({})",
+        "{} ({}, {}, {})",
         endpoints,
+        sync_visibility_label(&mirror.sync_visibility),
+        repo_filter_label(mirror),
         conflict_resolution_label(&mirror.conflict_resolution)
     )
+}
+
+fn sync_visibility_label(sync_visibility: &SyncVisibility) -> &'static str {
+    match sync_visibility {
+        SyncVisibility::All => "sync: all",
+        SyncVisibility::Private => "sync: private only",
+        SyncVisibility::Public => "sync: public only",
+    }
+}
+
+fn repo_filter_label(mirror: &MirrorConfig) -> String {
+    match (mirror.repo_whitelist.len(), mirror.repo_blacklist.len()) {
+        (0, 0) => "repos: all names".to_string(),
+        (whitelist, 0) => format!("repos: whitelist {whitelist}"),
+        (0, blacklist) => format!("repos: blacklist {blacklist}"),
+        (whitelist, blacklist) => {
+            format!("repos: whitelist {whitelist}, blacklist {blacklist}")
+        }
+    }
 }
 
 fn conflict_resolution_label(strategy: &ConflictResolutionStrategy) -> &'static str {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::SyncVisibility;
 use crate::config::{
     ConflictResolutionStrategy, EndpointConfig, MirrorConfig, NamespaceKind, SiteConfig,
     TokenConfig, Visibility,
@@ -109,6 +110,9 @@ fn matches_jobs_by_provider_and_namespace() {
                 endpoint("github", NamespaceKind::User, "alice"),
                 endpoint("gitea", NamespaceKind::User, "azalea"),
             ],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -127,6 +131,41 @@ fn matches_jobs_by_provider_and_namespace() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].group, "sync-1");
     assert_eq!(jobs[0].repo, "repo");
+}
+
+#[test]
+fn matching_jobs_respects_repo_name_filters() {
+    let mut mirror = MirrorConfig {
+        name: "sync-1".to_string(),
+        endpoints: vec![endpoint("github", NamespaceKind::User, "alice")],
+        sync_visibility: SyncVisibility::All,
+        repo_whitelist: vec!["^important-".to_string()],
+        repo_blacklist: vec!["-archive$".to_string()],
+        create_missing: true,
+        visibility: Visibility::Private,
+        allow_force: false,
+        conflict_resolution: ConflictResolutionStrategy::Fail,
+    };
+    let config = Config {
+        sites: vec![site("github", ProviderKind::Github)],
+        mirrors: vec![mirror.clone()],
+        webhook: None,
+    };
+
+    assert_eq!(
+        matching_jobs(&config, &webhook_event("important-api")).len(),
+        1
+    );
+    assert!(matching_jobs(&config, &webhook_event("important-archive")).is_empty());
+    assert!(matching_jobs(&config, &webhook_event("random")).is_empty());
+
+    mirror.repo_whitelist.clear();
+    let config = Config {
+        sites: vec![site("github", ProviderKind::Github)],
+        mirrors: vec![mirror],
+        webhook: None,
+    };
+    assert_eq!(matching_jobs(&config, &webhook_event("random")).len(), 1);
 }
 
 #[test]
@@ -327,6 +366,14 @@ fn site(name: &str, provider: ProviderKind) -> SiteConfig {
         api_url: None,
         token: TokenConfig::Value("secret".to_string()),
         git_username: None,
+    }
+}
+
+fn webhook_event(repo: &str) -> WebhookEvent {
+    WebhookEvent {
+        provider: Some(ProviderKind::Github),
+        repo: repo.to_string(),
+        namespace: Some("alice".to_string()),
     }
 }
 

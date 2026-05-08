@@ -19,6 +19,9 @@ fn parses_token_forms() {
 
         [[mirrors]]
         name = "personal"
+        sync_visibility = "public"
+        repo_whitelist = ["^important-", "-mirror$"]
+        repo_blacklist = ["-archive$"]
         create_missing = true
         visibility = "private"
         allow_force = false
@@ -43,6 +46,15 @@ fn parses_token_forms() {
         config.mirrors[0].conflict_resolution,
         ConflictResolutionStrategy::AutoRebasePullRequest
     );
+    assert_eq!(config.mirrors[0].sync_visibility, SyncVisibility::Public);
+    assert_eq!(
+        config.mirrors[0].repo_whitelist,
+        vec!["^important-".to_string(), "-mirror$".to_string()]
+    );
+    assert_eq!(
+        config.mirrors[0].repo_blacklist,
+        vec!["-archive$".to_string()]
+    );
     let webhook = config.webhook.unwrap();
     assert!(webhook.install);
     assert_eq!(webhook.url, "https://mirror.example.test/webhook");
@@ -64,6 +76,9 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
                 kind: NamespaceKind::User,
                 namespace: "alice".to_string(),
             }],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -90,6 +105,9 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
                     namespace: "alice".to_string(),
                 },
             ],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -139,6 +157,68 @@ fn api_base_defaults_match_providers() {
         .api_base(),
         "https://forgejo.example.test/api/v1"
     );
+}
+
+#[test]
+fn sync_visibility_matches_repo_privacy() {
+    assert!(SyncVisibility::All.matches_private(true));
+    assert!(SyncVisibility::All.matches_private(false));
+    assert!(SyncVisibility::Private.matches_private(true));
+    assert!(!SyncVisibility::Private.matches_private(false));
+    assert!(!SyncVisibility::Public.matches_private(true));
+    assert!(SyncVisibility::Public.matches_private(false));
+}
+
+#[test]
+fn repo_name_filter_applies_whitelist_then_blacklist() {
+    let mut mirror = mirror_config();
+    mirror.repo_whitelist = vec!["^important-".to_string(), "-mirror$".to_string()];
+    mirror.repo_blacklist = vec!["-archive$".to_string()];
+    let filter = mirror.repo_filter().unwrap();
+
+    assert!(filter.matches("important-api"));
+    assert!(filter.matches("user-mirror"));
+    assert!(!filter.matches("important-archive"));
+    assert!(!filter.matches("random"));
+}
+
+#[test]
+fn validation_rejects_invalid_repo_filter_regex() {
+    let mut config = Config {
+        sites: vec![site("github", ProviderKind::Github)],
+        mirrors: vec![mirror_config()],
+        webhook: None,
+    };
+    config.mirrors[0].repo_whitelist = vec!["(".to_string()];
+
+    let err = validate_config(&config).unwrap_err().to_string();
+
+    assert!(err.contains("invalid repo_whitelist regex"));
+}
+
+fn mirror_config() -> MirrorConfig {
+    MirrorConfig {
+        name: "personal".to_string(),
+        endpoints: vec![
+            EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::Org,
+                namespace: "example".to_string(),
+            },
+        ],
+        sync_visibility: SyncVisibility::All,
+        repo_whitelist: Vec::new(),
+        repo_blacklist: Vec::new(),
+        create_missing: true,
+        visibility: Visibility::Private,
+        allow_force: false,
+        conflict_resolution: ConflictResolutionStrategy::Fail,
+    }
 }
 
 fn site(name: &str, provider: ProviderKind) -> SiteConfig {

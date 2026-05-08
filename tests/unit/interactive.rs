@@ -12,6 +12,8 @@ fn wizard_builds_sync_group_from_profile_urls() {
         "",
         "n",
         "",
+        "",
+        "",
         "n",
         "4",
     ]
@@ -42,6 +44,7 @@ fn wizard_builds_sync_group_from_profile_urls() {
     assert_eq!(config.mirrors[0].endpoints[0].namespace, "hykilpikonna");
     assert_eq!(config.mirrors[0].endpoints[1].site, "gitea-example-test");
     assert_eq!(config.mirrors[0].endpoints[1].namespace, "azalea");
+    assert_eq!(config.mirrors[0].sync_visibility, SyncVisibility::All);
     assert!(config.mirrors[0].create_missing);
     assert_eq!(config.mirrors[0].visibility, Visibility::Private);
     assert!(!config.mirrors[0].allow_force);
@@ -73,6 +76,8 @@ fn wizard_can_build_three_way_sync() {
         "",
         "n",
         "",
+        "",
+        "",
         "n",
         "4",
     ]
@@ -98,6 +103,8 @@ fn wizard_can_enable_webhooks() {
         "gt-token",
         "",
         "n",
+        "",
+        "",
         "",
         "y",
         "https://mirror.example.test/webhook",
@@ -150,6 +157,8 @@ fn wizard_reuses_existing_credentials_for_same_instance() {
         "",
         "n",
         "",
+        "",
+        "",
         "n",
         "4",
     ]
@@ -200,6 +209,9 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
                     namespace: "alice".to_string(),
                 },
             ],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -226,6 +238,9 @@ fn wizard_can_ask_to_run_full_sync_after_config() {
         mirrors: vec![MirrorConfig {
             name: "sync-1".to_string(),
             endpoints: Vec::new(),
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -299,6 +314,9 @@ fn wizard_edits_existing_sync_group_from_menu() {
                     namespace: "alice".to_string(),
                 },
             ],
+            sync_visibility: SyncVisibility::Private,
+            repo_whitelist: vec!["^important-".to_string()],
+            repo_blacklist: vec!["-archive$".to_string()],
             create_missing: false,
             visibility: Visibility::Public,
             allow_force: true,
@@ -314,6 +332,10 @@ fn wizard_edits_existing_sync_group_from_menu() {
         "https://gitlab.com/bob",
         "",
         "n",
+        "public",
+        "y",
+        "^public-",
+        "-skip$",
         "",
         "n",
         "4",
@@ -334,6 +356,9 @@ fn wizard_edits_existing_sync_group_from_menu() {
     assert_eq!(mirror.endpoints[1].site, "gitlab");
     assert_eq!(mirror.endpoints[1].namespace, "bob");
     assert!(!mirror.create_missing);
+    assert_eq!(mirror.sync_visibility, SyncVisibility::Public);
+    assert_eq!(mirror.repo_whitelist, vec!["^public-".to_string()]);
+    assert_eq!(mirror.repo_blacklist, vec!["-skip$".to_string()]);
     assert_eq!(mirror.visibility, Visibility::Public);
     assert!(mirror.allow_force);
 
@@ -378,6 +403,9 @@ fn wizard_prefills_existing_sync_group_when_editing() {
                     namespace: "alice".to_string(),
                 },
             ],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -385,7 +413,7 @@ fn wizard_prefills_existing_sync_group_when_editing() {
         }],
         webhook: None,
     };
-    let input = ["2", "1", "", "", "", "", "n", "", "n", "4"].join("\n") + "\n";
+    let input = ["2", "1", "", "", "", "", "n", "", "", "", "n", "4"].join("\n") + "\n";
     let mut reader = Cursor::new(input.as_bytes());
     let mut output = Vec::new();
 
@@ -439,6 +467,9 @@ fn wizard_deletes_existing_sync_group_from_menu() {
                     namespace: "alice".to_string(),
                 },
             ],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,
@@ -495,6 +526,9 @@ fn wizard_can_go_back_from_delete_menu() {
                     namespace: "alice".to_string(),
                 },
             ],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
             allow_force: false,

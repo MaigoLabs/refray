@@ -19,3 +19,7 @@ tempfile = "3.13"
 tiny_http = "0.12"
 toml = "0.8"
 url = "2.5"
+
+[[test]]
+name = "sequential"
+path = "tests/e2e/sequential.rs"

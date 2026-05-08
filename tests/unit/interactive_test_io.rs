@@ -63,10 +63,15 @@ where
     W: Write,
 {
     let endpoints = prompt_sync_group_endpoints(reader, writer, config, &[])?;
+    let sync_visibility = prompt_sync_visibility(reader, writer, None)?;
+    let repo_filters = prompt_repo_filters(reader, writer, None)?;
     let conflict_resolution = prompt_conflict_resolution(reader, writer, None)?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
         endpoints,
+        sync_visibility,
+        repo_whitelist: repo_filters.whitelist,
+        repo_blacklist: repo_filters.blacklist,
         create_missing: true,
         visibility: Visibility::Private,
         allow_force: false,
@@ -267,15 +272,27 @@ where
         match value.parse::<usize>() {
             Ok(index) if (1..=config.mirrors.len()).contains(&index) => {
                 let existing = config.mirrors[index - 1].endpoints.clone();
+                let existing_sync_visibility = config.mirrors[index - 1].sync_visibility.clone();
+                let existing_repo_filters = RepoFilterInput {
+                    whitelist: config.mirrors[index - 1].repo_whitelist.clone(),
+                    blacklist: config.mirrors[index - 1].repo_blacklist.clone(),
+                };
                 let existing_conflict_resolution =
                     config.mirrors[index - 1].conflict_resolution.clone();
                 let endpoints = prompt_sync_group_endpoints(reader, writer, config, &existing)?;
+                let sync_visibility =
+                    prompt_sync_visibility(reader, writer, Some(&existing_sync_visibility))?;
+                let repo_filters =
+                    prompt_repo_filters(reader, writer, Some(&existing_repo_filters))?;
                 let conflict_resolution = prompt_conflict_resolution(
                     reader,
                     writer,
                     Some(&existing_conflict_resolution),
                 )?;
                 config.mirrors[index - 1].endpoints = endpoints;
+                config.mirrors[index - 1].sync_visibility = sync_visibility;
+                config.mirrors[index - 1].repo_whitelist = repo_filters.whitelist;
+                config.mirrors[index - 1].repo_blacklist = repo_filters.blacklist;
                 config.mirrors[index - 1].conflict_resolution = conflict_resolution;
                 prompt_webhook_setup(reader, writer, config)?;
                 writeln!(writer, "updated sync group {index}")?;
@@ -476,6 +493,100 @@ where
     }
 }
 
+fn prompt_sync_visibility<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    existing: Option<&SyncVisibility>,
+) -> Result<SyncVisibility>
+where
+    R: BufRead,
+    W: Write,
+{
+    let default = existing.map(sync_visibility_value).unwrap_or("all");
+    loop {
+        writeln!(writer, "Which repositories should this sync group include?")?;
+        writeln!(writer, "  1. all")?;
+        writeln!(writer, "  2. private only")?;
+        writeln!(writer, "  3. public only")?;
+        let value = prompt_with_default(reader, writer, "Sync visibility", default)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "all" => return Ok(SyncVisibility::All),
+            "2" | "private" | "private only" | "private-only" => {
+                return Ok(SyncVisibility::Private);
+            }
+            "3" | "public" | "public only" | "public-only" => {
+                return Ok(SyncVisibility::Public);
+            }
+            _ => writeln!(writer, "Enter 1, 2, 3, all, private, or public.")?,
+        }
+    }
+}
+
+fn prompt_repo_filters<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    existing: Option<&RepoFilterInput>,
+) -> Result<RepoFilterInput>
+where
+    R: BufRead,
+    W: Write,
+{
+    let existing = existing.cloned().unwrap_or_default();
+    let has_existing = !existing.whitelist.is_empty() || !existing.blacklist.is_empty();
+    if !prompt_bool(
+        reader,
+        writer,
+        "Configure repository name whitelist/blacklist?",
+        has_existing,
+    )? {
+        return Ok(RepoFilterInput::default());
+    }
+
+    Ok(RepoFilterInput {
+        whitelist: prompt_repo_pattern_list(
+            reader,
+            writer,
+            "Whitelist regexes (comma-separated, empty means all repo names)",
+            &existing.whitelist,
+        )?,
+        blacklist: prompt_repo_pattern_list(
+            reader,
+            writer,
+            "Blacklist regexes (comma-separated)",
+            &existing.blacklist,
+        )?,
+    })
+}
+
+fn prompt_repo_pattern_list<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    label: &str,
+    existing: &[String],
+) -> Result<Vec<String>>
+where
+    R: BufRead,
+    W: Write,
+{
+    let value = if existing.is_empty() {
+        prompt_optional(reader, writer, label)?
+    } else {
+        prompt_with_default(reader, writer, label, &existing.join(", "))?
+    };
+    if let Err(error) = validate_repo_pattern_list(&value) {
+        bail!(error);
+    }
+    Ok(parse_repo_pattern_list(&value))
+}
+
+fn sync_visibility_value(sync_visibility: &SyncVisibility) -> &'static str {
+    match sync_visibility {
+        SyncVisibility::All => "all",
+        SyncVisibility::Private => "private",
+        SyncVisibility::Public => "public",
+    }
+}
+
 fn conflict_resolution_value(strategy: &ConflictResolutionStrategy) -> &'static str {
     match strategy {
         ConflictResolutionStrategy::Fail => "fail",
@@ -538,6 +649,16 @@ where
         }
         writeln!(writer, "A value is required.")?;
     }
+}
+
+fn prompt_optional<R, W>(reader: &mut R, writer: &mut W, label: &str) -> Result<String>
+where
+    R: BufRead,
+    W: Write,
+{
+    write!(writer, "{label}: ")?;
+    writer.flush()?;
+    Ok(read_line(reader)?.trim().to_string())
 }
 
 fn prompt_with_default<R, W>(

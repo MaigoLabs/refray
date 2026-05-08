@@ -309,6 +309,56 @@ fn repo_deletion_decision_ignores_repos_not_previously_synced_everywhere() {
 }
 
 #[test]
+fn filtered_sync_visibility_does_not_treat_state_only_repos_as_deleted() {
+    let mut mirror = test_mirror();
+    mirror.sync_visibility = crate::config::SyncVisibility::Public;
+    let mut ref_state = RefState::default();
+    ref_state.set_repo(
+        &mirror.name,
+        "private-repo",
+        BTreeMap::from([("github_alice".to_string(), remote_ref_state("a", &[]))]),
+    );
+
+    let repo_filter = mirror.repo_filter().unwrap();
+    let names = sync_candidate_repo_names(&HashMap::new(), &ref_state, &mirror, &repo_filter);
+
+    assert!(names.is_empty());
+}
+
+#[test]
+fn all_visibility_keeps_state_only_repos_for_deletion_detection() {
+    let mirror = test_mirror();
+    let mut ref_state = RefState::default();
+    ref_state.set_repo(
+        &mirror.name,
+        "deleted-repo",
+        BTreeMap::from([("github_alice".to_string(), remote_ref_state("a", &[]))]),
+    );
+
+    let repo_filter = mirror.repo_filter().unwrap();
+    let names = sync_candidate_repo_names(&HashMap::new(), &ref_state, &mirror, &repo_filter);
+
+    assert_eq!(names, BTreeSet::from(["deleted-repo".to_string()]));
+}
+
+#[test]
+fn repo_name_filters_do_not_treat_state_only_repos_as_deleted() {
+    let mut mirror = test_mirror();
+    mirror.repo_whitelist = vec!["^public-".to_string()];
+    let repo_filter = mirror.repo_filter().unwrap();
+    let mut ref_state = RefState::default();
+    ref_state.set_repo(
+        &mirror.name,
+        "private-repo",
+        BTreeMap::from([("github_alice".to_string(), remote_ref_state("a", &[]))]),
+    );
+
+    let names = sync_candidate_repo_names(&HashMap::new(), &ref_state, &mirror, &repo_filter);
+
+    assert!(names.is_empty());
+}
+
+#[test]
 fn conflict_branch_prefixes_are_reversible_not_slug_collisions() {
     let slash_branch = conflict_pr_branch_prefix("release/foo");
     let dash_branch = conflict_pr_branch_prefix("release-foo");
@@ -358,6 +408,9 @@ fn test_mirror() -> MirrorConfig {
     MirrorConfig {
         name: "sync-1".to_string(),
         endpoints: vec![endpoint("github"), endpoint("gitea")],
+        sync_visibility: crate::config::SyncVisibility::All,
+        repo_whitelist: Vec::new(),
+        repo_blacklist: Vec::new(),
         create_missing: true,
         visibility: crate::config::Visibility::Private,
         allow_force: false,

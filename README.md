@@ -72,6 +72,8 @@ Sync only repositories whose names match a regex:
 refray sync --repo-pattern '^(foo|bar)-'
 ```
 
+For persistent per-group filters, set `repo_whitelist` and/or `repo_blacklist` in the config instead. `--repo-pattern` is an extra one-off filter applied on top of the group config.
+
 Retry only repositories that failed during the previous non-dry-run sync:
 
 ```sh
@@ -148,6 +150,10 @@ If `[webhook].reachability_check_interval_minutes` is configured, `serve` period
 
 Each mirror group is treated as a set of equivalent namespaces. Repositories are matched by repository name across all endpoints.
 
+Set `sync_visibility = "all"`, `"private"`, or `"public"` on a mirror group to choose which repository visibility is included in that group. `visibility` still controls the visibility used when `refray` creates a missing repository.
+
+Set `repo_whitelist = ["..."]` and/or `repo_blacklist = ["..."]` on a mirror group to filter repository names with regular expressions. An empty whitelist includes all repository names, and blacklist matches are excluded after whitelist matches. These name filters are independent from `sync_visibility`; both must match for a repository to be synced.
+
 For every repository name found in any endpoint, `refray` will:
 
 1. Create missing repositories on the other endpoints when `create_missing = true`.
@@ -194,6 +200,9 @@ token = { env = "GITEA_TOKEN" }
 
 [[mirrors]]
 name = "personal"
+sync_visibility = "all"
+repo_whitelist = ["^important-"]
+repo_blacklist = ["-archive$"]
 create_missing = true
 visibility = "private"
 allow_force = false
@@ -209,6 +218,38 @@ site = "gitea"
 kind = "user"
 namespace = "azalea"
 ```
+
+## Testing
+
+Run the normal, non-destructive test suite:
+
+```sh
+cargo test
+```
+
+The sequential live e2e test is ignored by default because it creates and deletes repositories on real provider accounts. Configure four token/username pairs in `.env` or the process environment:
+
+```sh
+GH_USER=...
+GH_TOKEN=...
+GL_USER=...
+GL_TOKEN=...
+GT_USER=...
+GT_TOKEN=...
+FO_USER=...
+FO_TOKEN=...
+```
+
+Optional base URL overrides are `GL_BASE_URL`, `GT_BASE_URL` or `GITEA_BASE_URL`, and `FO_BASE_URL` or `FORGEJO_BASE_URL`. The Gitea and Forgejo defaults are `https://gitea.com` and `https://codeberg.org`.
+
+Run the destructive e2e test explicitly:
+
+```sh
+REFRAY_E2E_ALLOW_DESTRUCTIVE=1 \
+  cargo test --test sequential -- --ignored --test-threads=1 --nocapture
+```
+
+By default cleanup only deletes repositories named `refray-e2e-*`. To start by deleting every owned repository visible to the configured accounts, set `REFRAY_E2E_CLEAR_ALL_REPOS=DELETE_ALL_OWNED_REPOS`. Provider skips (`REFRAY_E2E_SKIP_GITHUB`, `REFRAY_E2E_SKIP_GITLAB`, `REFRAY_E2E_SKIP_GITEA`, `REFRAY_E2E_SKIP_FORGEJO`) and `REFRAY_E2E_ALLOW_PARTIAL=1` are available for local debugging, but the full support check should run with all four providers.
 
 ## Issues and Pull Requests
 
