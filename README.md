@@ -13,6 +13,9 @@ Created becasue github is so unusable and [unreliable](https://red-squares.cian.
 
 Supported platforms: GitHub, GitLab, Gitea, Forgejo
 
+> [!NOTE]
+> Meow
+
 ## Install
 
 ### Option 1. Install from source
@@ -36,7 +39,9 @@ docker compose up -d --build
 docker compose run --rm --entrypoint nano refray /data/config/refray/config.toml
 ```
 
-## Configure
+## Usage
+
+### 1. Configure
 
 Run the interactive configuration wizard:
 
@@ -44,7 +49,45 @@ Run the interactive configuration wizard:
 refray config
 ```
 
-## One-time Sync
+<details><summary>Example Config</summary>
+
+```toml
+[[sites]]
+name = "github"
+provider = "github"
+base_url = "https://github.com"
+token = { env = "GITHUB_TOKEN" }
+
+[[sites]]
+name = "gitea"
+provider = "gitea"
+base_url = "https://gitea.example.com"
+token = { env = "GITEA_TOKEN" }
+
+[[mirrors]]
+name = "personal"
+sync_visibility = "all"
+repo_whitelist = ["^important-"]
+repo_blacklist = ["-archive$"]
+create_missing = true
+visibility = "private"
+allow_force = false
+conflict_resolution = "auto_rebase_pull_request"
+
+[[mirrors.endpoints]]
+site = "github"
+kind = "user"
+namespace = "hykilpikonna"
+
+[[mirrors.endpoints]]
+site = "gitea"
+kind = "user"
+namespace = "azalea"
+```
+
+</details>
+
+### 2. One-time Sync
 
 Run all configured mirror groups:
 
@@ -88,54 +131,40 @@ refray sync --jobs 8
 
 </details>
 
-## Service & Webhooks
+### 3. Service & Webhooks
 
 You can run `refray` as a service that listens for webhook events and runs full sync periodically. This is the recommended way to run `refray`.
 
-If you want to use webhooks, you need to expose port 8787 to a public URL that can be accessed by the git provider (e.g. using port forwarding, reverse proxy, or cloudflare tunnel). 
+> [!NOTE]
+> If you want to use webhooks, you need to expose port 8787 to a public URL that can be accessed by the git provider.<br>
+> This can be done using e.g. port forwarding, reverse proxy, cloudflare tunnel, or tailscale funnel.
 
-Start the receiver:
+Start the service:
 
 ```sh
 refray serve
 ```
 
-Expose that listener with your reverse proxy or tunnel, then install repository webhooks. If `[webhook]` is configured, the URL and secret can come from config:
+Install webhooks on all repos:
 
 ```sh
 refray webhook install
 ```
-
-Useful install filters:
-
-```sh
-refray webhook install \
-  --url https://mirror.example.com/webhook \
-  --secret-env REFRAY_WEBHOOK_SECRET \
-  --group personal \
-  --repo-pattern '^important-'
-```
-
-The receiver accepts `POST /` and `POST /webhook`. It verifies GitHub/Gitea HMAC SHA-256 signatures and GitLab webhook tokens, then queues `refray sync --group <group> --repo-pattern '^<repo>$'` internally. Duplicate events for the same group/repo are coalesced while a job is queued or running. Sync jobs are serialized inside the receiver so the local ref and failure caches stay consistent.
-
-When `[webhook].install = true`, normal `refray sync` also checks webhook installation status and installs missing webhooks for repositories that have not been recorded yet. Installation status is stored in `webhook-state.toml` under the work directory.
+Webhook install uses `[webhook].url` and `[webhook].secret` from your config.
 
 To uninstall webhooks previously installed by `refray`:
+
+> [!WARNING]
+> If you want to stop using `refray`, make sure you run this! Otherwise, all of your repos will keep trying to send webhooks to the URL.
 
 ```sh
 refray webhook uninstall
 ```
 
-Manual `webhook uninstall` checks repositories on the provider instead of trusting only local state. To uninstall one repository exactly:
-
-```sh
-refray webhook uninstall important-repo
-```
-
 To move installed hooks to a new public URL, use `webhook update`. It removes hooks matching the current configured `[webhook].url`, installs the new URL, updates `[webhook].url` in the config, and refreshes local webhook state:
 
 ```sh
-refray webhook update --url https://new.example.com/webhook
+refray webhook update https://new.example.com/webhook
 ```
 
 Serve can also run periodic full syncs. The interval can be configured in `[webhook].full_sync_interval_minutes` or overridden at startup:
@@ -182,42 +211,6 @@ Repository and branch deletion are propagated only when it is safe to infer inte
 Branch deletion follows the same rule at branch scope: if a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `refray` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
 
 Tags are fetched into provider-specific cache refs and pushed only when the tag object agrees across providers or exists on one side. Divergent tags are skipped and reported. Tag deletion is not propagated.
-
-## Example Config
-
-```toml
-[[sites]]
-name = "github"
-provider = "github"
-base_url = "https://github.com"
-token = { env = "GITHUB_TOKEN" }
-
-[[sites]]
-name = "gitea"
-provider = "gitea"
-base_url = "https://gitea.example.com"
-token = { env = "GITEA_TOKEN" }
-
-[[mirrors]]
-name = "personal"
-sync_visibility = "all"
-repo_whitelist = ["^important-"]
-repo_blacklist = ["-archive$"]
-create_missing = true
-visibility = "private"
-allow_force = false
-conflict_resolution = "auto_rebase_pull_request"
-
-[[mirrors.endpoints]]
-site = "github"
-kind = "user"
-namespace = "hykilpikonna"
-
-[[mirrors.endpoints]]
-site = "gitea"
-kind = "user"
-namespace = "azalea"
-```
 
 ## Testing
 

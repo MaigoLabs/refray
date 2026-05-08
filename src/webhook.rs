@@ -39,9 +39,6 @@ pub struct ServeOptions {
 pub struct WebhookInstallOptions {
     pub url: String,
     pub secret: String,
-    pub group: Option<String>,
-    pub repo: Option<String>,
-    pub repo_pattern: Option<String>,
     pub dry_run: bool,
     pub work_dir: Option<PathBuf>,
     pub jobs: usize,
@@ -50,8 +47,6 @@ pub struct WebhookInstallOptions {
 #[derive(Clone, Debug)]
 pub struct WebhookUninstallOptions {
     pub url: String,
-    pub group: Option<String>,
-    pub repo: Option<String>,
     pub dry_run: bool,
     pub work_dir: Option<PathBuf>,
     pub jobs: usize,
@@ -183,21 +178,8 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
     }
     let work_dir = options.work_dir.clone().unwrap_or_else(default_work_dir);
     let state = Arc::new(Mutex::new(load_webhook_state(&work_dir)?));
-    let repo_pattern = options
-        .repo_pattern
-        .as_deref()
-        .map(regex::Regex::new)
-        .transpose()
-        .with_context(|| "invalid --repo-pattern regex")?;
 
     for mirror in &config.mirrors {
-        if options
-            .group
-            .as_ref()
-            .is_some_and(|group| group != &mirror.name)
-        {
-            continue;
-        }
         crate::logln!();
         crate::logln!(
             "{} {}",
@@ -222,15 +204,6 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
                 .filter(|repo| mirror.sync_visibility.matches_private(repo.private))
                 .filter(|repo| repo_filter.matches(&repo.name))
             {
-                if options.repo.as_ref().is_some_and(|name| name != &repo.name) {
-                    continue;
-                }
-                if repo_pattern
-                    .as_ref()
-                    .is_some_and(|pattern| !pattern.is_match(&repo.name))
-                {
-                    continue;
-                }
                 tasks.push(WebhookInstallTask {
                     site: site.clone(),
                     group: mirror.name.clone(),
@@ -262,13 +235,6 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
     let mut state = load_webhook_state(&work_dir)?;
     let mut tasks = Vec::new();
     for mirror in &config.mirrors {
-        if options
-            .group
-            .as_ref()
-            .is_some_and(|group| group != &mirror.name)
-        {
-            continue;
-        }
         crate::logln!();
         crate::logln!(
             "{} {}",
@@ -287,9 +253,6 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
                 .list_repos(endpoint)
                 .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
             for repo in repos {
-                if options.repo.as_ref().is_some_and(|name| name != &repo.name) {
-                    continue;
-                }
                 tasks.push(WebhookUninstallTask {
                     group: mirror.name.clone(),
                     site: site.clone(),
@@ -329,8 +292,6 @@ pub fn update_webhooks(config: &Config, options: WebhookUpdateOptions) -> Result
             config,
             WebhookUninstallOptions {
                 url: options.old_url.clone(),
-                group: None,
-                repo: None,
                 dry_run: options.dry_run,
                 work_dir: options.work_dir.clone(),
                 jobs: options.jobs,
@@ -343,9 +304,6 @@ pub fn update_webhooks(config: &Config, options: WebhookUpdateOptions) -> Result
         WebhookInstallOptions {
             url: options.new_url,
             secret: options.secret,
-            group: None,
-            repo: None,
-            repo_pattern: None,
             dry_run: options.dry_run,
             work_dir: options.work_dir,
             jobs: options.jobs,

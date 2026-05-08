@@ -646,33 +646,13 @@ namespace = "{}"
         self.seed_all_main(&repo, "webhook base", 1_700_001_601)?;
         self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
 
-        self.refray([
-            "webhook",
-            "install",
-            "--dry-run",
-            "--repo-pattern",
-            &exact_pattern(&repo),
-            "--url",
-            "https://example.invalid/webhook",
-            "--secret",
-            WEBHOOK_SECRET,
-        ])?;
-        self.refray([
-            "webhook",
-            "uninstall",
-            &repo,
-            "--dry-run",
-            "--url",
-            "https://example.invalid/webhook",
-        ])?;
+        self.refray(["webhook", "install", "--dry-run"])?;
+        self.refray(["webhook", "uninstall", "--dry-run"])?;
         self.refray([
             "webhook",
             "update",
             "--dry-run",
-            "--url",
             "https://example.invalid/new-webhook",
-            "--secret",
-            WEBHOOK_SECRET,
         ])?;
 
         let listener = TcpListener::bind("127.0.0.1:0")?;
