@@ -21,7 +21,7 @@ use crate::webhook::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "git-sync")]
+#[command(name = "refray")]
 #[command(about = "Mirror repositories between Git hosting providers")]
 struct Cli {
     #[arg(long, global = true, value_name = "PATH")]

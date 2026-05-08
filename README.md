@@ -1,6 +1,6 @@
-# git-sync
+# refray
 
-`git-sync` mirrors repositories between Git hosting providers when you run it. It can run as a one-shot sync command, or as a webhook receiver that triggers one-repo syncs after push events.
+`refray` mirrors repositories between Git hosting providers when you run it. It can run as a one-shot sync command, or as a webhook receiver that triggers one-repo syncs after push events.
 
 Supported providers:
 
@@ -18,14 +18,14 @@ Forgejo uses the same API shape as Gitea.
 cargo build --release
 ```
 
-The binary will be at `target/release/git-sync`.
+The binary will be at `target/release/refray`.
 
 ## Configure
 
 Run the interactive configuration wizard:
 
 ```sh
-git-sync config
+refray config
 ```
 
 The wizard creates or updates the config file. It asks for profile or organization URLs, reuses existing credentials when it can, asks for a PAT only when needed, then offers webhook setup. Webhooks are strongly recommended because they sync soon after pushes and greatly reduce the chance of divergent histories.
@@ -43,7 +43,7 @@ Example wizard flow:
 PAT quick setup:
 
 - GitHub: open `https://github.com/settings/tokens`, create a classic PAT with `repo` permissions, then copy the token.
-- GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=git-sync&scopes=api,write_repository`, select `api` and `write_repository`, create the token, then copy it.
+- GitLab: open `<base-url>/-/user_settings/personal_access_tokens?name=refray&scopes=api,write_repository`, select `api` and `write_repository`, create the token, then copy it.
 - Gitea: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 - Forgejo: open `<base-url>/user/settings/applications`, create a token with repository access, then copy it.
 
@@ -62,54 +62,54 @@ Set `api_url` in the TOML if your instance is different.
 Run all configured mirror groups:
 
 ```sh
-git-sync sync
+refray sync
 ```
 
 Run one group:
 
 ```sh
-git-sync sync --group personal
+refray sync --group personal
 ```
 
 Preview commands without writing to Git remotes:
 
 ```sh
-git-sync sync --dry-run
+refray sync --dry-run
 ```
 
 Sync only repositories whose names match a regex:
 
 ```sh
-git-sync sync --repo-pattern '^(foo|bar)-'
+refray sync --repo-pattern '^(foo|bar)-'
 ```
 
 Retry only repositories that failed during the previous non-dry-run sync:
 
 ```sh
-git-sync sync --retry-failed
+refray sync --retry-failed
 ```
 
 Control repo-level parallelism:
 
 ```sh
-git-sync sync --jobs 8
+refray sync --jobs 8
 ```
 
 While jobs run, the bottom of the terminal shows one live status line per worker. When a repository finishes, its detailed log is printed as one complete block above those status lines. The default is 4 workers; use `--jobs 1` for serial sync.
 
-`git-sync` stores a small ref cache in the work directory. On later runs it first checks each repository with `git ls-remote --heads --tags`; when all endpoints report the same refs as the last successful sync, or the existing local bare mirror cache already has those refs, it skips the full fetch/push pass for that repository.
+`refray` stores a small ref cache in the work directory. On later runs it first checks each repository with `git ls-remote --heads --tags`; when all endpoints report the same refs as the last successful sync, or the existing local bare mirror cache already has those refs, it skips the full fetch/push pass for that repository.
 
 Use cron or another scheduler for automatic execution:
 
 ```cron
-*/15 * * * * GITHUB_TOKEN=... GITEA_TOKEN=... /path/to/git-sync sync
+*/15 * * * * GITHUB_TOKEN=... GITEA_TOKEN=... /path/to/refray sync
 ```
 
 ## Webhooks
 
 Webhook mode reduces the window for divergent commits by syncing a repository immediately after a provider sends a push event. It is still conservative: if two endpoints receive independent commits before webhook sync catches up, the normal divergence rules still apply.
 
-The interactive wizard can configure webhooks for you. During setup it starts a temporary test listener on `127.0.0.1:8787`, asks for the public URL, checks that the URL is reachable from the current machine, creates a webhook secret, and can enable periodic full syncs while `git-sync serve` is running.
+The interactive wizard can configure webhooks for you. During setup it starts a temporary test listener on `127.0.0.1:8787`, asks for the public URL, checks that the URL is reachable from the current machine, creates a webhook secret, and can enable periodic full syncs while `refray serve` is running.
 
 Example config:
 
@@ -125,66 +125,66 @@ reachability_check_interval_minutes = 15
 Start the receiver:
 
 ```sh
-git-sync serve \
+refray serve \
   --listen 127.0.0.1:8787
 ```
 
 Expose that listener with your reverse proxy or tunnel, then install repository webhooks. If `[webhook]` is configured, the URL and secret can come from config:
 
 ```sh
-git-sync webhook install
+refray webhook install
 ```
 
 Manual `webhook install` always checks the selected repositories on the provider and repairs or records the hook state. To install or repair one repository exactly:
 
 ```sh
-git-sync webhook install important-repo
+refray webhook install important-repo
 ```
 
 You can also pass them explicitly:
 
 ```sh
-git-sync webhook install \
+refray webhook install \
   --url https://mirror.example.com/webhook \
-  --secret-env GIT_SYNC_WEBHOOK_SECRET
+  --secret-env REFRAY_WEBHOOK_SECRET
 ```
 
 Useful install filters:
 
 ```sh
-git-sync webhook install \
+refray webhook install \
   --url https://mirror.example.com/webhook \
-  --secret-env GIT_SYNC_WEBHOOK_SECRET \
+  --secret-env REFRAY_WEBHOOK_SECRET \
   --group personal \
   --repo-pattern '^important-'
 ```
 
-The receiver accepts `POST /` and `POST /webhook`. It verifies GitHub/Gitea HMAC SHA-256 signatures and GitLab webhook tokens, then queues `git-sync sync --group <group> --repo-pattern '^<repo>$'` internally. Duplicate events for the same group/repo are coalesced while a job is queued or running. Sync jobs are serialized inside the receiver so the local ref and failure caches stay consistent.
+The receiver accepts `POST /` and `POST /webhook`. It verifies GitHub/Gitea HMAC SHA-256 signatures and GitLab webhook tokens, then queues `refray sync --group <group> --repo-pattern '^<repo>$'` internally. Duplicate events for the same group/repo are coalesced while a job is queued or running. Sync jobs are serialized inside the receiver so the local ref and failure caches stay consistent.
 
-When `[webhook].install = true`, normal `git-sync sync` also checks webhook installation status and installs missing webhooks for repositories that have not been recorded yet. Installation status is stored in `webhook-state.toml` under the work directory.
+When `[webhook].install = true`, normal `refray sync` also checks webhook installation status and installs missing webhooks for repositories that have not been recorded yet. Installation status is stored in `webhook-state.toml` under the work directory.
 
-To uninstall webhooks previously installed by `git-sync`:
+To uninstall webhooks previously installed by `refray`:
 
 ```sh
-git-sync webhook uninstall
+refray webhook uninstall
 ```
 
 Manual `webhook uninstall` checks repositories on the provider instead of trusting only local state. To uninstall one repository exactly:
 
 ```sh
-git-sync webhook uninstall important-repo
+refray webhook uninstall important-repo
 ```
 
 To move installed hooks to a new public URL, use `webhook update`. It removes hooks matching the current configured `[webhook].url`, installs the new URL, updates `[webhook].url` in the config, and refreshes local webhook state:
 
 ```sh
-git-sync webhook update --url https://new.example.com/webhook
+refray webhook update --url https://new.example.com/webhook
 ```
 
 Serve can also run periodic full syncs. The interval can be configured in `[webhook].full_sync_interval_minutes` or overridden at startup:
 
 ```sh
-git-sync serve --full-sync-interval-minutes 30
+refray serve --full-sync-interval-minutes 30
 ```
 
 If `[webhook].reachability_check_interval_minutes` is configured, `serve` periodically checks that the public webhook URL is still reachable and logs a warning when it is not.
@@ -193,7 +193,7 @@ If `[webhook].reachability_check_interval_minutes` is configured, `serve` period
 
 Each mirror group is treated as a set of equivalent namespaces. Repositories are matched by repository name across all endpoints.
 
-For every repository name found in any endpoint, `git-sync` will:
+For every repository name found in any endpoint, `refray` will:
 
 1. Create missing repositories on the other endpoints when `create_missing = true`.
 2. Fetch all branches and tags from each existing endpoint into a local bare mirror cache.
@@ -205,18 +205,18 @@ Branch conflict handling is intentionally conservative:
 - If all endpoints agree on a branch tip, that tip is pushed everywhere.
 - If one branch tip is a descendant of the others, the descendant wins and is pushed everywhere.
 - If branch tips diverged, `conflict_resolution` controls what happens.
-- If `allow_force = true` or `git-sync sync --force` is used, a diverged branch chooses the newest commit timestamp and force-pushes it.
+- If `allow_force = true` or `refray sync --force` is used, a diverged branch chooses the newest commit timestamp and force-pushes it.
 
 Conflict resolution strategies are configured per mirror group:
 
 - `fail`: fail the repository sync when branch tips diverge.
 - `auto_rebase`: rebase divergent commits in endpoint order into one branch history, push fast-forward updates normally, and force-push only endpoints whose original tip was rewritten. If rebase hits a file conflict, fail.
-- `pull_request`: push temporary `git-sync/conflicts/...` branches and open provider pull requests/merge requests so a person can resolve the divergence.
+- `pull_request`: push temporary `refray/conflicts/...` branches and open provider pull requests/merge requests so a person can resolve the divergence.
 - `auto_rebase_pull_request`: try `auto_rebase` first, then fall back to pull requests if rebase hits a conflict.
 
-When a previously opened conflict pull request is merged, the next sync sees the merged branch as the winning tip, pushes it to the other endpoints, and closes stale `git-sync/conflicts/...` pull requests for that branch.
+When a previously opened conflict pull request is merged, the next sync sees the merged branch as the winning tip, pushes it to the other endpoints, and closes stale `refray/conflicts/...` pull requests for that branch.
 
-Branch deletion is propagated only when it is safe to infer intent. If a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `git-sync` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
+Branch deletion is propagated only when it is safe to infer intent. If a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `refray` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
 
 Tags are fetched into provider-specific cache refs and pushed only when the tag object agrees across providers or exists on one side. Divergent tags are skipped and reported. Tag deletion is not propagated.
 

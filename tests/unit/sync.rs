@@ -182,6 +182,7 @@ fn conflict_branch_prefixes_are_reversible_not_slug_collisions() {
     assert_ne!(slash_branch, dash_branch);
     assert!(slash_branch.starts_with(CONFLICT_BRANCH_ROOT));
     assert!(dash_branch.starts_with(CONFLICT_BRANCH_ROOT));
+    assert!(conflict_pr_branch("main", "gitea", "abc123").starts_with(CONFLICT_BRANCH_ROOT));
     assert_eq!(
         conflict_pr_base_branch(&format!("{slash_branch}from-gitea-abc123")),
         Some("release/foo".to_string())

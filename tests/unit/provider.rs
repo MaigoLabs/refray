@@ -277,7 +277,7 @@ fn open_pull_request_posts_github_pull_when_missing() {
                     "request was {request}"
                 );
                 assert!(request.contains("Resolve conflict"));
-                assert!(request.contains("git-sync/conflicts/main/from-b-abc123"));
+                assert!(request.contains("refray/conflicts/main/from-b-abc123"));
                 assert!(request.contains("main"));
             }
             _ => unreachable!(),
@@ -305,7 +305,7 @@ fn open_pull_request_posts_github_pull_when_missing() {
             &PullRequestRequest {
                 title: "Resolve conflict".to_string(),
                 body: "Body".to_string(),
-                head_branch: "git-sync/conflicts/main/from-b-abc123".to_string(),
+                head_branch: "refray/conflicts/main/from-b-abc123".to_string(),
                 base_branch: "main".to_string(),
             },
         )
@@ -321,7 +321,7 @@ fn close_pull_requests_by_head_prefix_closes_matching_github_pulls() {
         vec![
             (
                 "200 OK",
-                r#"[{"number":7,"head":{"ref":"git-sync/conflicts/main/from-b-abc123"}},{"number":8,"head":{"ref":"feature"}}]"#,
+                r#"[{"number":7,"head":{"ref":"refray/conflicts/main/from-b-abc123"}},{"number":8,"head":{"ref":"feature"}}]"#,
             ),
             ("200 OK", r#"{"number":7}"#),
         ],
@@ -361,7 +361,7 @@ fn close_pull_requests_by_head_prefix_closes_matching_github_pulls() {
                 description: None,
             },
             "main",
-            "git-sync/conflicts/main/",
+            "refray/conflicts/main/",
         )
         .unwrap();
 
