@@ -329,6 +329,18 @@ impl GitMirror {
         Ok(())
     }
 
+    pub fn remote_branch_names_with_prefix(
+        &self,
+        remote: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .remote_branches(remote)?
+            .into_iter()
+            .filter_map(|(branch, _)| branch.starts_with(prefix).then_some(branch))
+            .collect())
+    }
+
     pub fn auto_rebase_branch_conflict(
         &self,
         remotes: &[RemoteSpec],

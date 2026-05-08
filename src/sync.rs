@@ -35,6 +35,7 @@ use self::state::{
 };
 
 pub const DEFAULT_JOBS: usize = 4;
+const CONFLICT_BRANCH_ROOT: &str = "git-sync/conflicts/";
 
 #[derive(Clone, Debug)]
 pub struct SyncOptions {
@@ -765,12 +766,16 @@ fn push_repo_refs(
     let (branches, conflicts) = mirror_repo.branch_decisions(remotes, context.allow_force)?;
     let branches_to_push = branches
         .into_iter()
+        .filter(|branch| !is_internal_conflict_branch(&branch.branch))
         .filter(|branch| !blocked_branches.contains(&branch.branch))
         .filter(|branch| !branch.target_remotes.is_empty())
         .collect::<Vec<_>>();
     let mut unresolved_branch_conflicts = Vec::new();
     let mut rebased_branch_updates = Vec::new();
     for conflict in conflicts {
+        if is_internal_conflict_branch(&conflict.branch) {
+            continue;
+        }
         if blocked_branches.contains(&conflict.branch) {
             continue;
         }
@@ -782,6 +787,18 @@ fn push_repo_refs(
         }
     }
     let had_branch_conflicts = !unresolved_branch_conflicts.is_empty();
+    let unresolved_branch_names = unresolved_branch_conflicts
+        .iter()
+        .map(|conflict| conflict.branch.clone())
+        .collect::<BTreeSet<_>>();
+    let unresolved_or_blocked_branches = unresolved_branch_names
+        .union(&blocked_branches)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let stale_conflict_branches = conflict_pr_base_branches(current_refs)
+        .difference(&unresolved_or_blocked_branches)
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     let (tags, tag_conflicts) = mirror_repo.tag_decisions(remotes)?;
     let had_tag_conflicts = !tag_conflicts.is_empty();
@@ -808,6 +825,13 @@ fn push_repo_refs(
         fail_on_unresolved_conflict(context, "tag conflict")?;
     }
 
+    let pushed_branch_names = branch_names(&branches_to_push);
+    let rebased_branch_names = branch_names_from_updates(&rebased_branch_updates);
+    let mut cleanup_branches = stale_conflict_branches;
+    cleanup_branches.retain(|branch| {
+        !pushed_branch_names.contains(branch) && !rebased_branch_names.contains(branch)
+    });
+
     if branches_to_push.is_empty()
         && rebased_branch_updates.is_empty()
         && tags_to_push.is_empty()
@@ -816,6 +840,11 @@ fn push_repo_refs(
         if !branch_deletions.is_empty() {
             print_branch_deletions(&branch_deletions);
             mirror_repo.delete_branches(remotes, &branch_deletions)?;
+        }
+        if !cleanup_branches.is_empty() {
+            close_resolved_pull_requests(context, mirror_repo, remotes, repos, &cleanup_branches)?;
+        }
+        if !branch_deletions.is_empty() || !cleanup_branches.is_empty() {
             return Ok(RepoRefSyncResult {
                 pushed: true,
                 had_conflicts: had_deletion_conflicts,
@@ -837,16 +866,11 @@ fn push_repo_refs(
     if !branches_to_push.is_empty() {
         print_branch_decisions(&branches_to_push);
         mirror_repo.push_branches(remotes, &branches_to_push, context.allow_force)?;
-        close_resolved_pull_requests(context, remotes, repos, &branch_names(&branches_to_push))?;
+        close_resolved_pull_requests(context, mirror_repo, remotes, repos, &pushed_branch_names)?;
     }
     if !rebased_branch_updates.is_empty() {
         mirror_repo.push_branch_updates(remotes, &rebased_branch_updates)?;
-        close_resolved_pull_requests(
-            context,
-            remotes,
-            repos,
-            &branch_names_from_updates(&rebased_branch_updates),
-        )?;
+        close_resolved_pull_requests(context, mirror_repo, remotes, repos, &rebased_branch_names)?;
     }
     if !tags_to_push.is_empty() {
         print_tag_decisions(&tags_to_push);
@@ -861,11 +885,15 @@ fn push_repo_refs(
             &unresolved_branch_conflicts,
         )?;
     }
+    if !cleanup_branches.is_empty() {
+        close_resolved_pull_requests(context, mirror_repo, remotes, repos, &cleanup_branches)?;
+    }
     Ok(RepoRefSyncResult {
         pushed: !branches_to_push.is_empty()
             || !rebased_branch_updates.is_empty()
             || !tags_to_push.is_empty()
-            || !branch_deletions.is_empty(),
+            || !branch_deletions.is_empty()
+            || !cleanup_branches.is_empty(),
         had_conflicts: had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts,
     })
 }
@@ -1037,6 +1065,7 @@ fn open_conflict_pull_requests(
 
 fn close_resolved_pull_requests(
     context: &RepoSyncContext<'_>,
+    mirror_repo: &GitMirror,
     remotes: &[RemoteSpec],
     repos: &[EndpointRepo],
     branches: &BTreeSet<String>,
@@ -1069,9 +1098,31 @@ fn close_resolved_pull_requests(
                     style(&remote.display).dim()
                 );
             }
+            delete_conflict_branches(mirror_repo, remotes, remote, &prefix)?;
         }
     }
     Ok(())
+}
+
+fn delete_conflict_branches(
+    mirror_repo: &GitMirror,
+    remotes: &[RemoteSpec],
+    remote: &RemoteSpec,
+    prefix: &str,
+) -> Result<()> {
+    let deletions = mirror_repo
+        .remote_branch_names_with_prefix(&remote.name, prefix)?
+        .into_iter()
+        .map(|branch| BranchDeletion {
+            branch,
+            deleted_remotes: Vec::new(),
+            target_remotes: vec![remote.name.clone()],
+        })
+        .collect::<Vec<_>>();
+    if deletions.is_empty() {
+        return Ok(());
+    }
+    mirror_repo.delete_branches(remotes, &deletions)
 }
 
 fn endpoint_repos_by_remote_name<'a>(
@@ -1111,6 +1162,13 @@ fn branch_names_from_updates(updates: &[BranchUpdate]) -> BTreeSet<String> {
     updates.iter().map(|update| update.branch.clone()).collect()
 }
 
+fn conflict_pr_base_branches(refs: &BTreeMap<String, RemoteRefState>) -> BTreeSet<String> {
+    refs.values()
+        .flat_map(|remote| remote.branches.keys())
+        .filter_map(|branch| conflict_pr_base_branch(branch))
+        .collect()
+}
+
 fn conflict_pr_branch(branch: &str, source_remote: &str, source_sha: &str) -> String {
     format!(
         "{}from-{}-{}",
@@ -1121,7 +1179,48 @@ fn conflict_pr_branch(branch: &str, source_remote: &str, source_sha: &str) -> St
 }
 
 fn conflict_pr_branch_prefix(branch: &str) -> String {
-    format!("git-sync/conflicts/{}/", safe_ref_component(branch))
+    format!("{}{}/", CONFLICT_BRANCH_ROOT, hex_component(branch))
+}
+
+fn is_internal_conflict_branch(branch: &str) -> bool {
+    branch.starts_with(CONFLICT_BRANCH_ROOT)
+}
+
+fn conflict_pr_base_branch(branch: &str) -> Option<String> {
+    let rest = branch.strip_prefix(CONFLICT_BRANCH_ROOT)?;
+    let (encoded, _) = rest.split_once('/')?;
+    decode_hex_component(encoded)
+}
+
+fn hex_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn decode_hex_component(value: &str) -> Option<String> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 fn safe_ref_component(value: &str) -> String {
@@ -1160,7 +1259,12 @@ fn branch_deletion_decisions(
         .collect::<Vec<_>>();
     let mut branches = BTreeSet::new();
     for refs in previous_refs.values() {
-        branches.extend(refs.branches.keys().cloned());
+        branches.extend(
+            refs.branches
+                .keys()
+                .filter(|branch| !is_internal_conflict_branch(branch))
+                .cloned(),
+        );
     }
 
     let mut deletions = Vec::new();
