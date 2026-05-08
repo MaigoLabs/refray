@@ -40,6 +40,7 @@ pub struct WebhookInstallOptions {
     pub url: String,
     pub secret: String,
     pub group: Option<String>,
+    pub repo: Option<String>,
     pub repo_pattern: Option<String>,
     pub dry_run: bool,
     pub work_dir: Option<PathBuf>,
@@ -48,7 +49,19 @@ pub struct WebhookInstallOptions {
 
 #[derive(Clone, Debug)]
 pub struct WebhookUninstallOptions {
+    pub url: String,
     pub group: Option<String>,
+    pub repo: Option<String>,
+    pub dry_run: bool,
+    pub work_dir: Option<PathBuf>,
+    pub jobs: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct WebhookUpdateOptions {
+    pub old_url: String,
+    pub new_url: String,
+    pub secret: String,
     pub dry_run: bool,
     pub work_dir: Option<PathBuf>,
     pub jobs: usize,
@@ -204,6 +217,9 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
                 .list_repos(endpoint)
                 .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
             for repo in repos {
+                if options.repo.as_ref().is_some_and(|name| name != &repo.name) {
+                    continue;
+                }
                 if repo_pattern
                     .as_ref()
                     .is_some_and(|pattern| !pattern.is_match(&repo.name))
@@ -221,7 +237,7 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
                 });
             }
         }
-        run_install_tasks(tasks, options.jobs, Arc::clone(&state))?;
+        run_install_tasks(tasks, options.jobs, Arc::clone(&state), false)?;
     }
     if !options.dry_run {
         let state = state
@@ -239,39 +255,97 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
     }
     let work_dir = options.work_dir.clone().unwrap_or_else(default_work_dir);
     let mut state = load_webhook_state(&work_dir)?;
-    if state.installations.is_empty() {
-        crate::logln!(
-            "{} no webhook installations recorded",
-            style("skip").yellow().bold()
-        );
-        return Ok(());
-    }
-
     let mut tasks = Vec::new();
-    for (key, installation) in &state.installations {
+    for mirror in &config.mirrors {
         if options
             .group
             .as_ref()
-            .is_some_and(|group| group != &installation.group)
+            .is_some_and(|group| group != &mirror.name)
         {
             continue;
         }
-        tasks.push(WebhookUninstallTask {
-            key: key.clone(),
-            site: config.site(&installation.endpoint.site).cloned(),
-            installation: installation.clone(),
-            dry_run: options.dry_run,
-        });
+        crate::logln!();
+        crate::logln!(
+            "{} {}",
+            style("Webhook group").cyan().bold(),
+            style(&mirror.name).bold()
+        );
+        for endpoint in &mirror.endpoints {
+            let site = config.site(&endpoint.site).unwrap();
+            let client = ProviderClient::new(site)?;
+            crate::logln!(
+                "  {} {}",
+                style("list").cyan().bold(),
+                style(endpoint.label()).dim()
+            );
+            let repos = client
+                .list_repos(endpoint)
+                .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
+            for repo in repos {
+                if options.repo.as_ref().is_some_and(|name| name != &repo.name) {
+                    continue;
+                }
+                tasks.push(WebhookUninstallTask {
+                    group: mirror.name.clone(),
+                    site: site.clone(),
+                    endpoint: endpoint.clone(),
+                    repo,
+                    url: options.url.clone(),
+                    dry_run: options.dry_run,
+                });
+            }
+        }
     }
     let removed_keys = run_uninstall_tasks(tasks, options.jobs)?;
 
     if !options.dry_run {
         for key in removed_keys {
             state.installations.remove(&key);
+            state.skipped.remove(&key);
         }
         save_webhook_state(&work_dir, &state)?;
     }
     Ok(())
+}
+
+pub fn update_webhooks(config: &Config, options: WebhookUpdateOptions) -> Result<()> {
+    validate_config(config)?;
+    if options.jobs == 0 {
+        bail!("--jobs must be at least 1");
+    }
+    if options.old_url != options.new_url {
+        crate::logln!(
+            "{} {} -> {}",
+            style("Webhook URL").cyan().bold(),
+            style(&options.old_url).dim(),
+            style(&options.new_url).cyan()
+        );
+        uninstall_webhooks(
+            config,
+            WebhookUninstallOptions {
+                url: options.old_url.clone(),
+                group: None,
+                repo: None,
+                dry_run: options.dry_run,
+                work_dir: options.work_dir.clone(),
+                jobs: options.jobs,
+            },
+        )?;
+    }
+
+    install_webhooks(
+        config,
+        WebhookInstallOptions {
+            url: options.new_url,
+            secret: options.secret,
+            group: None,
+            repo: None,
+            repo_pattern: None,
+            dry_run: options.dry_run,
+            work_dir: options.work_dir,
+            jobs: options.jobs,
+        },
+    )
 }
 
 pub fn ensure_configured_webhooks(
@@ -307,7 +381,7 @@ pub fn ensure_configured_webhooks(
             dry_run: false,
         });
     }
-    run_install_tasks(tasks, jobs, Arc::clone(&state))?;
+    run_install_tasks(tasks, jobs, Arc::clone(&state), true)?;
     let state = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -422,9 +496,11 @@ struct WebhookInstallTask {
 
 #[derive(Clone, Debug)]
 struct WebhookUninstallTask {
-    key: String,
-    site: Option<crate::config::SiteConfig>,
-    installation: WebhookInstallation,
+    group: String,
+    site: crate::config::SiteConfig,
+    endpoint: EndpointConfig,
+    repo: RemoteRepo,
+    url: String,
     dry_run: bool,
 }
 
@@ -432,6 +508,7 @@ fn run_install_tasks(
     tasks: Vec<WebhookInstallTask>,
     jobs: usize,
     state: Arc<Mutex<WebhookState>>,
+    use_state_cache: bool,
 ) -> Result<()> {
     if tasks.is_empty() {
         return Ok(());
@@ -461,7 +538,7 @@ fn run_install_tasks(
                     break;
                 };
                 if result_sender
-                    .send(install_webhook_task(task, &state))
+                    .send(install_webhook_task(task, &state, use_state_cache))
                     .is_err()
                 {
                     break;
@@ -549,9 +626,13 @@ fn run_uninstall_tasks(tasks: Vec<WebhookUninstallTask>, jobs: usize) -> Result<
     Ok(removed_keys)
 }
 
-fn install_webhook_task(task: WebhookInstallTask, state: &Arc<Mutex<WebhookState>>) -> Result<()> {
+fn install_webhook_task(
+    task: WebhookInstallTask,
+    state: &Arc<Mutex<WebhookState>>,
+    use_state_cache: bool,
+) -> Result<()> {
     let key = webhook_installation_key(&task.group, &task.endpoint, &task.repo.name);
-    {
+    if use_state_cache {
         let state = state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -588,6 +669,16 @@ fn install_webhook_task(task: WebhookInstallTask, state: &Arc<Mutex<WebhookState
     let client = ProviderClient::new(&task.site)?;
     if let Err(error) = client.install_webhook(&task.endpoint, &task.repo, &task.url, &task.secret)
     {
+        if is_duplicate_webhook_error(&error) {
+            crate::logln!(
+                "  {} {} {}",
+                style("exists").green().bold(),
+                style(&task.repo.name).cyan(),
+                style(format!("webhook on {}", task.endpoint.label())).dim()
+            );
+            record_webhook_installation(state, key, task);
+            return Ok(());
+        }
         if let Some(reason) = non_actionable_webhook_failure_reason(&error) {
             crate::logln!(
                 "  {} {} {}",
@@ -618,6 +709,15 @@ fn install_webhook_task(task: WebhookInstallTask, state: &Arc<Mutex<WebhookState
             )
         });
     }
+    record_webhook_installation(state, key, task);
+    Ok(())
+}
+
+fn record_webhook_installation(
+    state: &Arc<Mutex<WebhookState>>,
+    key: String,
+    task: WebhookInstallTask,
+) {
     let mut state = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -631,10 +731,10 @@ fn install_webhook_task(task: WebhookInstallTask, state: &Arc<Mutex<WebhookState
             url: task.url,
         },
     );
-    Ok(())
 }
 
 fn uninstall_webhook_task(task: WebhookUninstallTask) -> Result<Option<String>> {
+    let key = webhook_installation_key(&task.group, &task.endpoint, &task.repo.name);
     crate::logln!(
         "  {} {} {}",
         style(if task.dry_run {
@@ -644,36 +744,23 @@ fn uninstall_webhook_task(task: WebhookUninstallTask) -> Result<Option<String>> 
         })
         .red()
         .bold(),
-        style(&task.installation.repo).cyan(),
-        style(format!("from {}", task.installation.endpoint.label())).dim()
+        style(&task.repo.name).cyan(),
+        style(format!("from {}", task.endpoint.label())).dim()
     );
     if task.dry_run {
         return Ok(None);
     }
-    let Some(site) = task.site else {
-        crate::logln!(
-            "  {} {} {}",
-            style("skip").yellow().bold(),
-            style(&task.installation.repo).cyan(),
-            style(format!("unknown site {}", task.installation.endpoint.site)).dim()
-        );
-        return Ok(None);
-    };
-    let client = ProviderClient::new(&site)?;
+    let client = ProviderClient::new(&task.site)?;
     client
-        .uninstall_webhook(
-            &task.installation.endpoint,
-            &task.installation.repo,
-            &task.installation.url,
-        )
+        .uninstall_webhook(&task.endpoint, &task.repo.name, &task.url)
         .with_context(|| {
             format!(
                 "failed to uninstall webhook for {} from {}",
-                task.installation.repo,
-                task.installation.endpoint.label()
+                task.repo.name,
+                task.endpoint.label()
             )
         })?;
-    Ok(Some(task.key))
+    Ok(Some(key))
 }
 
 fn non_actionable_webhook_failure_reason(error: &anyhow::Error) -> Option<String> {
@@ -698,6 +785,16 @@ fn non_actionable_webhook_failure_reason(error: &anyhow::Error) -> Option<String
         return Some("repository is archived/read-only".to_string());
     }
     None
+}
+
+fn is_duplicate_webhook_error(error: &anyhow::Error) -> bool {
+    let text = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    text.contains("422 unprocessable entity") && text.contains("hook already exists")
 }
 
 fn webhook_installation_key(group: &str, endpoint: &EndpointConfig, repo: &str) -> String {

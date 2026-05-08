@@ -135,6 +135,12 @@ Expose that listener with your reverse proxy or tunnel, then install repository 
 git-sync webhook install
 ```
 
+Manual `webhook install` always checks the selected repositories on the provider and repairs or records the hook state. To install or repair one repository exactly:
+
+```sh
+git-sync webhook install important-repo
+```
+
 You can also pass them explicitly:
 
 ```sh
@@ -161,6 +167,18 @@ To uninstall webhooks previously installed by `git-sync`:
 
 ```sh
 git-sync webhook uninstall
+```
+
+Manual `webhook uninstall` checks repositories on the provider instead of trusting only local state. To uninstall one repository exactly:
+
+```sh
+git-sync webhook uninstall important-repo
+```
+
+To move installed hooks to a new public URL, use `webhook update`. It removes hooks matching the current configured `[webhook].url`, installs the new URL, updates `[webhook].url` in the config, and refreshes local webhook state:
+
+```sh
+git-sync webhook update --url https://new.example.com/webhook
 ```
 
 Serve can also run periodic full syncs. The interval can be configured in `[webhook].full_sync_interval_minutes` or overridden at startup:

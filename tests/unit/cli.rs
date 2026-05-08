@@ -89,14 +89,13 @@ fn cli_accepts_webhook_install() {
         "git-sync",
         "webhook",
         "install",
+        "repo-one",
         "--url",
         "https://mirror.example.test/webhook",
         "--secret",
         "secret",
         "--group",
         "sync-1",
-        "--repo-pattern",
-        "^repo$",
         "--jobs",
         "6",
     ])
@@ -111,8 +110,31 @@ fn cli_accepts_webhook_install() {
     );
     assert_eq!(args.secret, Some("secret".to_string()));
     assert_eq!(args.group, Some("sync-1".to_string()));
-    assert_eq!(args.repo_pattern, Some("^repo$".to_string()));
+    assert_eq!(args.repo, Some("repo-one".to_string()));
+    assert_eq!(args.repo_pattern, None);
     assert_eq!(args.jobs, 6);
+}
+
+#[test]
+fn cli_accepts_webhook_install_repo_pattern() {
+    let cli = Cli::try_parse_from([
+        "git-sync",
+        "webhook",
+        "install",
+        "--url",
+        "https://mirror.example.test/webhook",
+        "--secret",
+        "secret",
+        "--repo-pattern",
+        "^repo$",
+    ])
+    .unwrap();
+
+    let Command::Webhook(WebhookCommand::Install(args)) = cli.command else {
+        panic!("parsed unexpected command");
+    };
+    assert_eq!(args.repo, None);
+    assert_eq!(args.repo_pattern, Some("^repo$".to_string()));
 }
 
 #[test]
@@ -121,6 +143,9 @@ fn cli_accepts_webhook_uninstall() {
         "git-sync",
         "webhook",
         "uninstall",
+        "repo-one",
+        "--url",
+        "https://mirror.example.test/webhook",
         "--group",
         "sync-1",
         "--dry-run",
@@ -132,7 +157,49 @@ fn cli_accepts_webhook_uninstall() {
     let Command::Webhook(WebhookCommand::Uninstall(args)) = cli.command else {
         panic!("parsed unexpected command");
     };
+    assert_eq!(
+        args.url,
+        Some("https://mirror.example.test/webhook".to_string())
+    );
     assert_eq!(args.group, Some("sync-1".to_string()));
+    assert_eq!(args.repo, Some("repo-one".to_string()));
     assert!(args.dry_run);
     assert_eq!(args.jobs, 3);
+}
+
+#[test]
+fn cli_accepts_webhook_update() {
+    let cli = Cli::try_parse_from([
+        "git-sync",
+        "webhook",
+        "update",
+        "--url",
+        "https://new.example.test/webhook",
+        "--secret-env",
+        "WEBHOOK_SECRET",
+        "--jobs",
+        "5",
+    ])
+    .unwrap();
+
+    let Command::Webhook(WebhookCommand::Update(args)) = cli.command else {
+        panic!("parsed unexpected command");
+    };
+    assert_eq!(args.url, "https://new.example.test/webhook");
+    assert_eq!(args.secret_env, Some("WEBHOOK_SECRET".to_string()));
+    assert_eq!(args.jobs, 5);
+}
+
+#[test]
+fn cli_rejects_scoped_webhook_update() {
+    let result = Cli::try_parse_from([
+        "git-sync",
+        "webhook",
+        "update",
+        "repo-one",
+        "--url",
+        "https://new.example.test/webhook",
+    ]);
+
+    assert!(result.is_err());
 }

@@ -182,6 +182,7 @@ fn blocked_webhook_install_is_skipped_and_recorded() {
             dry_run: false,
         },
         &state,
+        false,
     )
     .unwrap();
 
@@ -205,6 +206,115 @@ fn archived_webhook_failure_is_non_actionable() {
         non_actionable_webhook_failure_reason(&error).as_deref(),
         Some("repository is archived/read-only")
     );
+}
+
+#[test]
+fn duplicate_webhook_error_records_existing_installation() {
+    let error = anyhow::anyhow!(
+        "{}",
+        r#"POST https://api.github.com/repos/alice/repo/hooks returned 422 Unprocessable Entity: {"message":"Validation Failed","errors":[{"resource":"Hook","code":"custom","message":"Hook already exists on this repository"}]}"#
+    );
+    assert!(is_duplicate_webhook_error(&error));
+
+    let state = Arc::new(Mutex::new(WebhookState::default()));
+    let task = WebhookInstallTask {
+        site: site("github", ProviderKind::Github),
+        group: "sync-1".to_string(),
+        endpoint: endpoint("github", NamespaceKind::User, "alice"),
+        repo: RemoteRepo {
+            name: "repo".to_string(),
+            clone_url: "https://github.com/alice/repo.git".to_string(),
+            private: true,
+            description: None,
+        },
+        url: "https://mirror.example.test/webhook".to_string(),
+        secret: "secret".to_string(),
+        dry_run: false,
+    };
+    let key = webhook_installation_key(&task.group, &task.endpoint, &task.repo.name);
+
+    record_webhook_installation(&state, key.clone(), task);
+
+    let state = state.lock().unwrap();
+    assert!(state.skipped.is_empty());
+    assert_eq!(state.installations[&key].repo, "repo");
+}
+
+#[test]
+fn install_task_state_cache_is_only_used_for_sync() {
+    let (api_url, handle) = request_server(
+        vec![("200 OK", "[]"), ("201 Created", r#"{"id":1}"#)],
+        |index, request| match index {
+            0 => assert!(request.starts_with("GET /repos/alice/repo/hooks ")),
+            1 => assert!(request.starts_with("POST /repos/alice/repo/hooks ")),
+            _ => unreachable!(),
+        },
+    );
+    let endpoint = endpoint("github", NamespaceKind::User, "alice");
+    let key = webhook_installation_key("sync-1", &endpoint, "repo");
+    let state = Arc::new(Mutex::new(WebhookState::default()));
+    state.lock().unwrap().installations.insert(
+        key,
+        WebhookInstallation {
+            group: "sync-1".to_string(),
+            endpoint: endpoint.clone(),
+            repo: "repo".to_string(),
+            url: "https://mirror.example.test/webhook".to_string(),
+        },
+    );
+
+    install_webhook_task(
+        WebhookInstallTask {
+            site: SiteConfig {
+                api_url: Some(api_url),
+                ..site("github", ProviderKind::Github)
+            },
+            group: "sync-1".to_string(),
+            endpoint,
+            repo: RemoteRepo {
+                name: "repo".to_string(),
+                clone_url: "https://github.com/alice/repo.git".to_string(),
+                private: true,
+                description: None,
+            },
+            url: "https://mirror.example.test/webhook".to_string(),
+            secret: "secret".to_string(),
+            dry_run: false,
+        },
+        &state,
+        false,
+    )
+    .unwrap();
+
+    handle.join().unwrap();
+}
+
+#[test]
+fn uninstall_task_removes_state_even_when_hook_is_missing() {
+    let (api_url, handle) = one_request_server("200 OK", "[]", |request| {
+        assert!(request.starts_with("GET /repos/alice/repo/hooks "))
+    });
+
+    let key = uninstall_webhook_task(WebhookUninstallTask {
+        group: "sync-1".to_string(),
+        site: SiteConfig {
+            api_url: Some(api_url),
+            ..site("github", ProviderKind::Github)
+        },
+        endpoint: endpoint("github", NamespaceKind::User, "alice"),
+        repo: RemoteRepo {
+            name: "repo".to_string(),
+            clone_url: "https://github.com/alice/repo.git".to_string(),
+            private: true,
+            description: None,
+        },
+        url: "https://mirror.example.test/webhook".to_string(),
+        dry_run: false,
+    })
+    .unwrap();
+
+    assert_eq!(key.as_deref(), Some("sync-1\tgithub\tUser\talice\trepo"));
+    handle.join().unwrap();
 }
 
 fn site(name: &str, provider: ProviderKind) -> SiteConfig {
@@ -249,6 +359,34 @@ where
             body.len()
         )
         .unwrap();
+    });
+    (format!("http://{address}"), handle)
+}
+
+fn request_server<F>(
+    responses: Vec<(&'static str, &'static str)>,
+    mut assert_request: F,
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnMut(usize, &str) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        for (index, (status, body)) in responses.into_iter().enumerate() {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let bytes = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert_request(index, &request);
+
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
     });
     (format!("http://{address}"), handle)
 }
