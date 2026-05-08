@@ -8,6 +8,8 @@ Created becasue github is so unusable and unreliable and I want to leave, but I 
 - **read-write mirrors**: Make changes from any provider, and the changes will sync to the others
 - **webhook support**: Sync right after push, reduce potential divergence window
 - **conflict handling**: Rebase or open pull requests when two platforms diverge
+- **tracks deletions**: Delete branches/repos across platforms when they are deleted from one platform
+- **selective sync**: Sync subset of repos by regex white/black list, or by private/public visibility
 
 Supported platforms: GitHub, GitLab, Gitea, Forgejo
 
@@ -169,7 +171,9 @@ Conflict resolution strategies are configured per mirror group:
 
 When a previously opened conflict pull request is merged, the next sync sees the merged branch as the winning tip, pushes it to the other endpoints, and closes stale `refray/conflicts/...` pull requests for that branch.
 
-Branch deletion is propagated only when it is safe to infer intent. If a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `refray` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
+Repository and branch deletion are propagated only when it is safe to infer intent. If a repository existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous synced refs, `refray` deletes it from the remaining endpoints instead of recreating it. If the repository was deleted everywhere, `refray` removes its saved sync state. If the repository was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
+
+Branch deletion follows the same rule at branch scope: if a branch existed on every endpoint in the previous successful sync, then disappears from one endpoint while the remaining endpoints still have the previous tip, `refray` deletes it from the remaining endpoints instead of recreating it. If the branch was deleted on one endpoint but changed elsewhere, it is treated as a conflict and skipped.
 
 Tags are fetched into provider-specific cache refs and pushed only when the tag object agrees across providers or exists on one side. Divergent tags are skipped and reported. Tag deletion is not propagated.
 
