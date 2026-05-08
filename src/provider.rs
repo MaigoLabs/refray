@@ -106,6 +106,14 @@ impl<'a> ProviderClient<'a> {
         )
     }
 
+    pub fn delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
+        dispatch_provider!(self.site.provider,
+            github => self.github_delete_repo(endpoint, repo_name),
+            gitlab => self.gitlab_delete_repo(endpoint, repo_name),
+            gitea_like => self.gitea_delete_repo(endpoint, repo_name),
+        )
+    }
+
     pub fn install_webhook(
         &self,
         endpoint: &EndpointConfig,
@@ -244,6 +252,11 @@ impl<'a> ProviderClient<'a> {
             Some("User") => Some(NamespaceKind::User),
             _ => None,
         })
+    }
+
+    fn github_delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
+        let url = self.repo_url(endpoint, repo_name, "GitHub")?;
+        self.delete(&url).map(|_| ())
     }
 
     fn github_install_webhook(
@@ -396,6 +409,11 @@ impl<'a> ProviderClient<'a> {
         let url = format!("{}/projects", self.site.api_base());
         self.post_json::<GitlabProject>(&url, &serde_json::Value::Object(body))
             .map(Into::into)
+    }
+
+    fn gitlab_delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
+        let url = self.gitlab_project_url(endpoint, repo_name);
+        self.delete(&url).map(|_| ())
     }
 
     fn gitlab_group(&self, namespace: &str) -> Result<GitlabGroup> {
@@ -574,6 +592,11 @@ impl<'a> ProviderClient<'a> {
         Ok(None)
     }
 
+    fn gitea_delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
+        let url = self.repo_url(endpoint, repo_name, "Gitea/Forgejo")?;
+        self.delete(&url).map(|_| ())
+    }
+
     fn gitea_install_webhook(
         &self,
         endpoint: &EndpointConfig,
@@ -674,6 +697,22 @@ impl<'a> ProviderClient<'a> {
         Ok(closed)
     }
 
+    fn repo_url(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        provider: &str,
+    ) -> Result<String> {
+        if matches!(endpoint.kind, NamespaceKind::Group) {
+            bail!("{provider} endpoints use kind 'user' or 'org'");
+        }
+        Ok(format!(
+            "{}/repos/{}/{repo_name}",
+            self.site.api_base(),
+            endpoint.namespace
+        ))
+    }
+
     fn repo_hooks_url(
         &self,
         endpoint: &EndpointConfig,
@@ -707,18 +746,20 @@ impl<'a> ProviderClient<'a> {
     }
 
     fn gitlab_hooks_url(&self, endpoint: &EndpointConfig, repo_name: &str) -> String {
-        let project = format!("{}/{repo_name}", endpoint.namespace);
-        format!(
-            "{}/projects/{}/hooks",
-            self.site.api_base(),
-            urlencoding(&project)
-        )
+        format!("{}/hooks", self.gitlab_project_url(endpoint, repo_name))
     }
 
     fn gitlab_merge_requests_url(&self, endpoint: &EndpointConfig, repo_name: &str) -> String {
+        format!(
+            "{}/merge_requests",
+            self.gitlab_project_url(endpoint, repo_name)
+        )
+    }
+
+    fn gitlab_project_url(&self, endpoint: &EndpointConfig, repo_name: &str) -> String {
         let project = format!("{}/{repo_name}", endpoint.namespace);
         format!(
-            "{}/projects/{}/merge_requests",
+            "{}/projects/{}",
             self.site.api_base(),
             urlencoding(&project)
         )

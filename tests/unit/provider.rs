@@ -256,6 +256,105 @@ fn uninstall_webhook_deletes_matching_github_hook() {
 }
 
 #[test]
+fn delete_repo_deletes_github_repo() {
+    let (api_url, handle) = one_request_server("204 No Content", "", |request| {
+        assert!(
+            request.starts_with("DELETE /repos/alice/repo "),
+            "request was {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer secret"),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Github, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .delete_repo(
+            &EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+        )
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn delete_repo_deletes_url_encoded_gitlab_project() {
+    let (api_url, handle) = one_request_server("202 Accepted", "", |request| {
+        assert!(
+            request.starts_with("DELETE /projects/parent%2Falice%2Frepo "),
+            "request was {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("private-token: secret"),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .delete_repo(
+            &EndpointConfig {
+                site: "gitlab".to_string(),
+                kind: NamespaceKind::Group,
+                namespace: "parent/alice".to_string(),
+            },
+            "repo",
+        )
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn delete_repo_deletes_gitea_repo() {
+    let (api_url, handle) = one_request_server("204 No Content", "", |request| {
+        assert!(
+            request.starts_with("DELETE /repos/alice/repo "),
+            "request was {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: token secret"),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitea, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .delete_repo(
+            &EndpointConfig {
+                site: "gitea".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+        )
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
 fn open_pull_request_posts_github_pull_when_missing() {
     let (api_url, handle) = request_server(
         vec![

@@ -149,6 +149,23 @@ impl RefState {
             .insert(repo.to_string(), refs);
     }
 
+    pub(super) fn remove_repo(&mut self, group: &str, repo: &str) {
+        let Some(repos) = self.repos.get_mut(group) else {
+            return;
+        };
+        repos.remove(repo);
+        if repos.is_empty() {
+            self.repos.remove(group);
+        }
+    }
+
+    pub(super) fn repo_names(&self, group: &str) -> BTreeSet<String> {
+        self.repos
+            .get(group)
+            .map(|repos| repos.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub(super) fn repo(
         &self,
         group: &str,
