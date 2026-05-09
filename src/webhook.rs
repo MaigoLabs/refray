@@ -241,6 +241,7 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
             style("Webhook group").cyan().bold(),
             style(&mirror.name).bold()
         );
+        let repo_filter = mirror.repo_filter()?;
         for endpoint in &mirror.endpoints {
             let site = config.site(&endpoint.site).unwrap();
             let client = ProviderClient::new(site)?;
@@ -252,7 +253,10 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
             let repos = client
                 .list_repos(endpoint)
                 .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
-            for repo in repos {
+            for repo in repos
+                .into_iter()
+                .filter(|repo| webhook_repo_matches(mirror, &repo_filter, repo))
+            {
                 tasks.push(WebhookUninstallTask {
                     group: mirror.name.clone(),
                     site: site.clone(),

@@ -239,6 +239,148 @@ fn install_webhooks_respects_visibility_and_repo_name_filters() {
 }
 
 #[test]
+fn uninstall_webhooks_respects_visibility_and_repo_name_filters() {
+    let repos = r#"[
+        {"name":"important-api","clone_url":"https://github.com/alice/important-api.git","private":false,"description":null,"owner":{"login":"alice"}},
+        {"name":"important-private","clone_url":"https://github.com/alice/important-private.git","private":true,"description":null,"owner":{"login":"alice"}},
+        {"name":"important-archive","clone_url":"https://github.com/alice/important-archive.git","private":false,"description":null,"owner":{"login":"alice"}},
+        {"name":"random","clone_url":"https://github.com/alice/random.git","private":false,"description":null,"owner":{"login":"alice"}}
+    ]"#;
+    let hooks = r#"[{"id":42,"url":"https://api.github.com/repos/alice/important-api/hooks/42","config":{"url":"https://mirror.example.test/webhook"}}]"#;
+    let (api_url, handle) = request_server(
+        vec![
+            ("200 OK", repos),
+            ("200 OK", repos),
+            ("200 OK", hooks),
+            ("204 No Content", ""),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request
+                    .starts_with("GET /user/repos?affiliation=owner&visibility=all&per_page=100 "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request
+                    .starts_with("GET /user/repos?affiliation=owner&visibility=all&per_page=100 "),
+                "request was {request}"
+            ),
+            2 => assert!(
+                request.starts_with("GET /repos/alice/important-api/hooks "),
+                "request was {request}"
+            ),
+            3 => assert!(
+                request.starts_with("DELETE /repos/alice/important-api/hooks/42 "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let temp = tempfile::TempDir::new().unwrap();
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![
+            SiteConfig {
+                api_url: Some(api_url.clone()),
+                ..site("github", ProviderKind::Github)
+            },
+            SiteConfig {
+                api_url: Some(api_url),
+                ..site("github-peer", ProviderKind::Github)
+            },
+        ],
+        mirrors: vec![filtered_mirror()],
+        webhook: None,
+    };
+
+    uninstall_webhooks(
+        &config,
+        WebhookUninstallOptions {
+            url: "https://mirror.example.test/webhook".to_string(),
+            dry_run: false,
+            work_dir: Some(temp.path().to_path_buf()),
+            jobs: 1,
+        },
+    )
+    .unwrap();
+
+    handle.join().unwrap();
+}
+
+#[test]
+fn uninstall_webhooks_skips_blocked_provider_access() {
+    let repos = r#"[
+        {"name":"BiliExp-Task","clone_url":"https://github.com/alice/BiliExp-Task.git","private":false,"description":null,"owner":{"login":"alice"}}
+    ]"#;
+    let blocked = r#"{"message":"Repository access blocked","block":{"reason":"sensitive_data","created_at":"2021-05-18T16:29:54Z","html_url":"https://github.com/tos"}}"#;
+    let (api_url, handle) = request_server(
+        vec![
+            ("200 OK", repos),
+            ("200 OK", repos),
+            ("403 Forbidden", blocked),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request
+                    .starts_with("GET /user/repos?affiliation=owner&visibility=all&per_page=100 "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request
+                    .starts_with("GET /user/repos?affiliation=owner&visibility=all&per_page=100 "),
+                "request was {request}"
+            ),
+            2 => assert!(
+                request.starts_with("GET /repos/alice/BiliExp-Task/hooks "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let temp = tempfile::TempDir::new().unwrap();
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![
+            SiteConfig {
+                api_url: Some(api_url.clone()),
+                ..site("github", ProviderKind::Github)
+            },
+            SiteConfig {
+                api_url: Some(api_url),
+                ..site("github-peer", ProviderKind::Github)
+            },
+        ],
+        mirrors: vec![MirrorConfig {
+            name: "sync-1".to_string(),
+            endpoints: vec![
+                endpoint("github", NamespaceKind::User, "alice"),
+                endpoint("github-peer", NamespaceKind::User, "bob"),
+            ],
+            sync_visibility: SyncVisibility::Public,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
+            create_missing: true,
+            visibility: Visibility::Private,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
+        }],
+        webhook: None,
+    };
+
+    uninstall_webhooks(
+        &config,
+        WebhookUninstallOptions {
+            url: "https://mirror.example.test/webhook".to_string(),
+            dry_run: false,
+            work_dir: Some(temp.path().to_path_buf()),
+            jobs: 1,
+        },
+    )
+    .unwrap();
+
+    handle.join().unwrap();
+}
+
+#[test]
 fn configured_webhook_install_respects_visibility_and_repo_name_filters() {
     let (api_url, handle) = request_server(
         vec![("200 OK", "[]"), ("201 Created", r#"{"id":1}"#)],
