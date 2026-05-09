@@ -342,7 +342,6 @@ fn blocked_webhook_install_is_skipped_and_recorded() {
             dry_run: false,
         },
         &state,
-        false,
     )
     .unwrap();
 
@@ -401,7 +400,7 @@ fn duplicate_webhook_error_records_existing_installation() {
 }
 
 #[test]
-fn install_task_state_cache_is_only_used_for_sync() {
+fn install_task_rechecks_cached_installation() {
     let (api_url, handle) = request_server(
         vec![("200 OK", "[]"), ("201 Created", r#"{"id":1}"#)],
         |index, request| match index {
@@ -442,7 +441,6 @@ fn install_task_state_cache_is_only_used_for_sync() {
             dry_run: false,
         },
         &state,
-        false,
     )
     .unwrap();
 

@@ -58,13 +58,13 @@ jobs = 8
 name = "github"
 provider = "github"
 base_url = "https://github.com"
-token = { env = "GITHUB_TOKEN" }
+token = { value = "github_pat_..." }
 
 [[sites]]
 name = "gitea"
 provider = "gitea"
 base_url = "https://gitea.example.com"
-token = { env = "GITEA_TOKEN" }
+token = { value = "gitea_pat_..." }
 
 [[mirrors]]
 name = "personal"

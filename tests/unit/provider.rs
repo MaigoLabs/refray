@@ -63,6 +63,26 @@ fn group_paths_are_url_encoded_for_gitlab() {
 }
 
 #[test]
+fn webhook_url_matching_tolerates_trailing_slash_and_default_port() {
+    assert!(webhook_urls_match(
+        "https://example.test",
+        "https://example.test/"
+    ));
+    assert!(webhook_urls_match(
+        "https://example.test:443/webhook/",
+        "https://EXAMPLE.test/webhook"
+    ));
+    assert!(!webhook_urls_match(
+        "https://example.test/webhook",
+        "https://example.test/"
+    ));
+    assert!(!webhook_urls_match(
+        "https://example.test/webhook?token=one",
+        "https://example.test/webhook?token=two"
+    ));
+}
+
+#[test]
 fn validate_token_checks_user_endpoint_with_provider_auth_header() {
     let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
         assert!(request.starts_with("GET /user "), "request was {request}");
@@ -217,7 +237,7 @@ fn uninstall_webhook_deletes_matching_github_hook() {
         vec![
             (
                 "200 OK",
-                r#"[{"id":42,"config":{"url":"https://mirror.example.test/webhook"}}]"#,
+                r#"[{"id":42,"url":"https://api.github.com/repos/alice/repo/hooks/42","config":{"url":"https://mirror.example.test/webhook"}}]"#,
             ),
             ("204 No Content", ""),
         ],
@@ -256,10 +276,54 @@ fn uninstall_webhook_deletes_matching_github_hook() {
 }
 
 #[test]
+fn uninstall_webhook_matches_github_hook_url_without_trailing_slash() {
+    let (api_url, handle) = request_server(
+        vec![
+            (
+                "200 OK",
+                r#"[{"id":42,"url":"https://api.github.com/repos/alice/repo/hooks/42","config":{"url":"https://mirror.example.test"}}]"#,
+            ),
+            ("204 No Content", ""),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request.starts_with("GET /repos/alice/repo/hooks "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request.starts_with("DELETE /repos/alice/repo/hooks/42 "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Github, None)
+    };
+    let client = ProviderClient::new(&site).unwrap();
+
+    let removed = client
+        .uninstall_webhook(
+            &EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            "https://mirror.example.test/",
+        )
+        .unwrap();
+
+    assert!(removed);
+    handle.join().unwrap();
+}
+
+#[test]
 fn uninstall_webhook_reports_missing_github_hook() {
     let (api_url, handle) = one_request_server(
         "200 OK",
-        r#"[{"id":42,"config":{"url":"https://old.example.test/webhook"}}]"#,
+        r#"[{"id":42,"url":"https://api.github.com/repos/alice/repo/hooks/42","config":{"url":"https://old.example.test/webhook"}}]"#,
         |request| {
             assert!(
                 request.starts_with("GET /repos/alice/repo/hooks "),

@@ -787,9 +787,10 @@ impl<'a> ProviderClient<'a> {
 
     fn find_existing_hook(&self, hooks_url: &str, target_url: &str) -> Result<Option<RepoHook>> {
         let hooks: Vec<RepoHook> = self.paged_get(hooks_url)?;
-        Ok(hooks
-            .into_iter()
-            .find(|hook| hook.url() == Some(target_url)))
+        Ok(hooks.into_iter().find(|hook| {
+            hook.url()
+                .is_some_and(|hook_url| webhook_urls_match(hook_url, target_url))
+        }))
     }
 
     fn upsert_hook(
@@ -981,6 +982,34 @@ fn is_conflict_error(error: &anyhow::Error) -> bool {
     error.to_string().contains("409 Conflict")
 }
 
+fn webhook_urls_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (normalize_webhook_url(left), normalize_webhook_url(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn normalize_webhook_url(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let port = url.port_or_known_default()?;
+    let username = url.username();
+    let password = url.password().unwrap_or_default();
+    let path = url.path().trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
+    let query = url.query().unwrap_or_default();
+    Some(format!(
+        "{scheme}://{username}:{password}@{host}:{port}{path}?{query}"
+    ))
+}
+
 fn next_link(headers: &HeaderMap) -> Option<String> {
     let header = headers.get("link")?.to_str().ok()?;
     for part in header.split(',') {
@@ -1131,9 +1160,10 @@ struct PullRequestHead {
 
 impl RepoHook {
     fn url(&self) -> Option<&str> {
-        self.url
-            .as_deref()
-            .or_else(|| self.config.get("url").map(String::as_str))
+        self.config
+            .get("url")
+            .map(String::as_str)
+            .or(self.url.as_deref())
     }
 }
 

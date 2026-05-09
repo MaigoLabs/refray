@@ -9,8 +9,8 @@ use console::style;
 use regex::Regex;
 
 use crate::config::{
-    Config, ConflictResolutionStrategy, DEFAULT_JOBS, EndpointConfig, MirrorConfig, RepoNameFilter,
-    SyncVisibility, default_work_dir, validate_config,
+    Config, ConflictResolutionStrategy, DEFAULT_JOBS, EndpointConfig, MirrorConfig, NamespaceKind,
+    RepoNameFilter, SyncVisibility, default_work_dir, validate_config,
 };
 use crate::git::{
     BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RemoteSpec,
@@ -846,12 +846,8 @@ fn remote_specs(context: &RepoSyncContext<'_>, repos: &[EndpointRepo]) -> Result
         }
         let site = context.config.site(&endpoint_repo.endpoint.site).unwrap();
         let client = ProviderClient::new(site)?;
-        let remote_name = safe_remote_name(&format!(
-            "{}_{}",
-            endpoint_repo.endpoint.site, endpoint_repo.endpoint.namespace
-        ));
         remotes.push(RemoteSpec {
-            name: remote_name,
+            name: remote_name_for_endpoint(&endpoint_repo.endpoint),
             url: client.authenticated_clone_url(&endpoint_repo.repo.clone_url)?,
             display: endpoint_repo.endpoint.label(),
         });
@@ -1274,7 +1270,20 @@ fn remote_name_for_endpoint_repo(endpoint_repo: &EndpointRepo) -> String {
 }
 
 fn remote_name_for_endpoint(endpoint: &EndpointConfig) -> String {
-    safe_remote_name(&format!("{}_{}", endpoint.site, endpoint.namespace))
+    format!(
+        "r{}_{}_{}",
+        hex_component(&endpoint.site),
+        namespace_kind_key(&endpoint.kind),
+        hex_component(&endpoint.namespace)
+    )
+}
+
+fn namespace_kind_key(kind: &NamespaceKind) -> &'static str {
+    match kind {
+        NamespaceKind::User => "user",
+        NamespaceKind::Org => "org",
+        NamespaceKind::Group => "group",
+    }
 }
 
 fn branch_names(branches: &[crate::git::BranchDecision]) -> BTreeSet<String> {
@@ -1329,7 +1338,7 @@ fn hex_component(value: &str) -> String {
 }
 
 fn decode_hex_component(value: &str) -> Option<String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
