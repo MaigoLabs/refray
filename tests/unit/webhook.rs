@@ -2,7 +2,7 @@ use super::*;
 use crate::config::SyncVisibility;
 use crate::config::{
     ConflictResolutionStrategy, EndpointConfig, MirrorConfig, NamespaceKind, SiteConfig,
-    TokenConfig, Visibility,
+    TokenConfig, Visibility, WebhookConfig,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -167,6 +167,124 @@ fn matching_jobs_respects_repo_name_filters() {
         webhook: None,
     };
     assert_eq!(matching_jobs(&config, &webhook_event("random")).len(), 1);
+}
+
+#[test]
+fn install_webhooks_respects_visibility_and_repo_name_filters() {
+    let repos = r#"[
+        {"name":"important-api","clone_url":"https://github.com/alice/important-api.git","private":false,"description":null,"owner":{"login":"alice"}},
+        {"name":"important-private","clone_url":"https://github.com/alice/important-private.git","private":true,"description":null,"owner":{"login":"alice"}},
+        {"name":"important-archive","clone_url":"https://github.com/alice/important-archive.git","private":false,"description":null,"owner":{"login":"alice"}},
+        {"name":"random","clone_url":"https://github.com/alice/random.git","private":false,"description":null,"owner":{"login":"alice"}}
+    ]"#;
+    let (api_url, handle) = request_server(
+        vec![
+            ("200 OK", repos),
+            ("200 OK", "[]"),
+            ("200 OK", "[]"),
+            ("201 Created", r#"{"id":1}"#),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request
+                    .starts_with("GET /user/repos?affiliation=owner&visibility=all&per_page=100 "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request
+                    .starts_with("GET /user/repos?affiliation=owner&visibility=all&per_page=100 "),
+                "request was {request}"
+            ),
+            2 => assert!(
+                request.starts_with("GET /repos/alice/important-api/hooks "),
+                "request was {request}"
+            ),
+            3 => assert!(
+                request.starts_with("POST /repos/alice/important-api/hooks "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let temp = tempfile::TempDir::new().unwrap();
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![
+            SiteConfig {
+                api_url: Some(api_url.clone()),
+                ..site("github", ProviderKind::Github)
+            },
+            SiteConfig {
+                api_url: Some(api_url),
+                ..site("github-peer", ProviderKind::Github)
+            },
+        ],
+        mirrors: vec![filtered_mirror()],
+        webhook: None,
+    };
+
+    install_webhooks(
+        &config,
+        WebhookInstallOptions {
+            url: "https://mirror.example.test/webhook".to_string(),
+            secret: "secret".to_string(),
+            dry_run: false,
+            work_dir: Some(temp.path().to_path_buf()),
+            jobs: 1,
+        },
+    )
+    .unwrap();
+
+    handle.join().unwrap();
+}
+
+#[test]
+fn configured_webhook_install_respects_visibility_and_repo_name_filters() {
+    let (api_url, handle) = request_server(
+        vec![("200 OK", "[]"), ("201 Created", r#"{"id":1}"#)],
+        |index, request| match index {
+            0 => assert!(
+                request.starts_with("GET /repos/alice/important-api/hooks "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request.starts_with("POST /repos/alice/important-api/hooks "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let temp = tempfile::TempDir::new().unwrap();
+    let mirror = filtered_mirror();
+    let endpoint = mirror.endpoints[0].clone();
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![
+            SiteConfig {
+                api_url: Some(api_url),
+                ..site("github", ProviderKind::Github)
+            },
+            site("github-peer", ProviderKind::Github),
+        ],
+        mirrors: vec![mirror.clone()],
+        webhook: Some(WebhookConfig {
+            install: true,
+            url: "https://mirror.example.test/webhook".to_string(),
+            secret: TokenConfig::Value("secret".to_string()),
+            full_sync_interval_minutes: None,
+            reachability_check_interval_minutes: None,
+        }),
+    };
+    let repos = vec![
+        endpoint_repo(&endpoint, "important-api", false),
+        endpoint_repo(&endpoint, "important-private", true),
+        endpoint_repo(&endpoint, "important-archive", false),
+        endpoint_repo(&endpoint, "random", false),
+    ];
+
+    ensure_configured_webhooks(&config, &mirror, &repos, temp.path(), 1).unwrap();
+
+    handle.join().unwrap();
 }
 
 #[test]
@@ -411,6 +529,34 @@ fn site(name: &str, provider: ProviderKind) -> SiteConfig {
         api_url: None,
         token: TokenConfig::Value("secret".to_string()),
         git_username: None,
+    }
+}
+
+fn filtered_mirror() -> MirrorConfig {
+    MirrorConfig {
+        name: "sync-1".to_string(),
+        endpoints: vec![
+            endpoint("github", NamespaceKind::User, "alice"),
+            endpoint("github-peer", NamespaceKind::User, "bob"),
+        ],
+        sync_visibility: SyncVisibility::Public,
+        repo_whitelist: vec!["^important-".to_string()],
+        repo_blacklist: vec!["-archive$".to_string()],
+        create_missing: true,
+        visibility: Visibility::Private,
+        conflict_resolution: ConflictResolutionStrategy::Fail,
+    }
+}
+
+fn endpoint_repo(endpoint: &EndpointConfig, name: &str, private: bool) -> EndpointRepo {
+    EndpointRepo {
+        endpoint: endpoint.clone(),
+        repo: RemoteRepo {
+            name: name.to_string(),
+            clone_url: format!("https://github.com/alice/{name}.git"),
+            private,
+            description: None,
+        },
     }
 }
 

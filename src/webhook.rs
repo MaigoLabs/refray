@@ -15,7 +15,8 @@ use sha2::Sha256;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::config::{
-    Config, EndpointConfig, MirrorConfig, ProviderKind, default_work_dir, validate_config,
+    Config, EndpointConfig, MirrorConfig, ProviderKind, RepoNameFilter, default_work_dir,
+    validate_config,
 };
 use crate::provider::{EndpointRepo, ProviderClient, RemoteRepo};
 use crate::state::{load_toml_or_default, save_toml};
@@ -201,8 +202,7 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
                 .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
             for repo in repos
                 .into_iter()
-                .filter(|repo| mirror.sync_visibility.matches_private(repo.private))
-                .filter(|repo| repo_filter.matches(&repo.name))
+                .filter(|repo| webhook_repo_matches(mirror, &repo_filter, repo))
             {
                 tasks.push(WebhookInstallTask {
                     site: site.clone(),
@@ -326,8 +326,12 @@ pub fn ensure_configured_webhooks(
     }
     let secret = webhook.secret()?;
     let state = Arc::new(Mutex::new(load_webhook_state(work_dir)?));
+    let repo_filter = mirror.repo_filter()?;
     let mut tasks = Vec::new();
     for endpoint_repo in repos {
+        if !webhook_repo_matches(mirror, &repo_filter, &endpoint_repo.repo) {
+            continue;
+        }
         let Some(site) = config.site(&endpoint_repo.endpoint.site) else {
             continue;
         };
@@ -346,6 +350,14 @@ pub fn ensure_configured_webhooks(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     save_webhook_state(work_dir, &state)
+}
+
+fn webhook_repo_matches(
+    mirror: &MirrorConfig,
+    repo_filter: &RepoNameFilter,
+    repo: &RemoteRepo,
+) -> bool {
+    mirror.sync_visibility.matches_private(repo.private) && repo_filter.matches(&repo.name)
 }
 
 pub fn check_webhook_url_reachable(url: &str) -> Result<()> {
