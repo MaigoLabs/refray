@@ -450,7 +450,7 @@ fn install_task_state_cache_is_only_used_for_sync() {
 }
 
 #[test]
-fn uninstall_task_removes_state_even_when_hook_is_missing() {
+fn uninstall_task_keeps_state_when_hook_is_missing() {
     let (api_url, handle) = one_request_server("200 OK", "[]", |request| {
         assert!(request.starts_with("GET /repos/alice/repo/hooks "))
     });
@@ -473,7 +473,37 @@ fn uninstall_task_removes_state_even_when_hook_is_missing() {
     })
     .unwrap();
 
-    assert_eq!(key.as_deref(), Some("sync-1\tgithub\tUser\talice\trepo"));
+    assert_eq!(key, None);
+    handle.join().unwrap();
+}
+
+#[test]
+fn blocked_webhook_uninstall_is_skipped() {
+    let (api_url, handle) = one_request_server(
+        "403 Forbidden",
+        r#"{"message":"Repository access blocked","block":{"reason":"sensitive_data","created_at":"2021-05-18T16:29:54Z","html_url":"https://github.com/tos"}}"#,
+        |request| assert!(request.starts_with("GET /repos/alice/repo/hooks ")),
+    );
+
+    let key = uninstall_webhook_task(WebhookUninstallTask {
+        group: "sync-1".to_string(),
+        site: SiteConfig {
+            api_url: Some(api_url),
+            ..site("github", ProviderKind::Github)
+        },
+        endpoint: endpoint("github", NamespaceKind::User, "alice"),
+        repo: RemoteRepo {
+            name: "repo".to_string(),
+            clone_url: "https://github.com/alice/repo.git".to_string(),
+            private: true,
+            description: None,
+        },
+        url: "https://mirror.example.test/webhook".to_string(),
+        dry_run: false,
+    })
+    .unwrap();
+
+    assert_eq!(key, None);
     handle.join().unwrap();
 }
 

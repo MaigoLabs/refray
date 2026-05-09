@@ -726,32 +726,53 @@ fn remove_webhook_state_keys(state: &mut WebhookState, keys: Vec<String>, url: &
 
 fn uninstall_webhook_task(task: WebhookUninstallTask) -> Result<Option<String>> {
     let key = webhook_installation_key(&task.group, &task.endpoint, &task.repo.name);
-    crate::logln!(
-        "  {} {} {}",
-        style(if task.dry_run {
-            "would uninstall"
-        } else {
-            "uninstall"
-        })
-        .red()
-        .bold(),
-        style(&task.repo.name).cyan(),
-        style(format!("from {}", task.endpoint.label())).dim()
-    );
     if task.dry_run {
+        crate::logln!(
+            "  {} {} {}",
+            style("would uninstall").red().bold(),
+            style(&task.repo.name).cyan(),
+            style(format!("from {}", task.endpoint.label())).dim()
+        );
         return Ok(None);
     }
     let client = ProviderClient::new(&task.site)?;
-    client
-        .uninstall_webhook(&task.endpoint, &task.repo.name, &task.url)
-        .with_context(|| {
+    match client.uninstall_webhook(&task.endpoint, &task.repo.name, &task.url) {
+        Ok(true) => {
+            crate::logln!(
+                "  {} {} {}",
+                style("uninstall").red().bold(),
+                style(&task.repo.name).cyan(),
+                style(format!("from {}", task.endpoint.label())).dim()
+            );
+            Ok(Some(key))
+        }
+        Ok(false) => {
+            crate::logln!(
+                "  {} {} {}",
+                style("missing").yellow().bold(),
+                style(&task.repo.name).cyan(),
+                style(format!("webhook from {}", task.endpoint.label())).dim()
+            );
+            Ok(None)
+        }
+        Err(error) if non_actionable_webhook_failure_reason(&error).is_some() => {
+            let reason = non_actionable_webhook_failure_reason(&error).unwrap();
+            crate::logln!(
+                "  {} {} {}",
+                style("skip").yellow().bold(),
+                style(&task.repo.name).cyan(),
+                style(format!("from {}: {reason}", task.endpoint.label())).dim()
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error).with_context(|| {
             format!(
                 "failed to uninstall webhook for {} from {}",
                 task.repo.name,
                 task.endpoint.label()
             )
-        })?;
-    Ok(Some(key))
+        }),
+    }
 }
 
 fn non_actionable_webhook_failure_reason(error: &anyhow::Error) -> Option<String> {

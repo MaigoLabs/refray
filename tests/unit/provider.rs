@@ -256,6 +256,40 @@ fn uninstall_webhook_deletes_matching_github_hook() {
 }
 
 #[test]
+fn uninstall_webhook_reports_missing_github_hook() {
+    let (api_url, handle) = one_request_server(
+        "200 OK",
+        r#"[{"id":42,"config":{"url":"https://old.example.test/webhook"}}]"#,
+        |request| {
+            assert!(
+                request.starts_with("GET /repos/alice/repo/hooks "),
+                "request was {request}"
+            )
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Github, None)
+    };
+    let client = ProviderClient::new(&site).unwrap();
+
+    let removed = client
+        .uninstall_webhook(
+            &EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            "https://mirror.example.test/webhook",
+        )
+        .unwrap();
+
+    assert!(!removed);
+    handle.join().unwrap();
+}
+
+#[test]
 fn delete_repo_deletes_github_repo() {
     let (api_url, handle) = one_request_server("204 No Content", "", |request| {
         assert!(
