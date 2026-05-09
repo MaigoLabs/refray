@@ -75,7 +75,7 @@ fn branch_decisions_choose_fast_forward_tip() {
 
     let mirror = fixture.mirror();
     fixture.fetch_all(&mirror);
-    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes()).unwrap();
 
     assert!(conflicts.is_empty());
     let main = find_branch(&decisions, "main");
@@ -94,7 +94,7 @@ fn branch_decisions_do_not_target_remotes_that_already_match() {
 
     let mirror = fixture.mirror();
     fixture.fetch_all(&mirror);
-    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes()).unwrap();
 
     assert!(conflicts.is_empty());
     let main = find_branch(&decisions, "main");
@@ -132,7 +132,7 @@ fn cached_remote_refs_match_ls_remote_snapshot_after_fetch() {
 }
 
 #[test]
-fn branch_decisions_report_divergent_tips_without_force() {
+fn branch_decisions_report_divergent_tips_as_conflicts() {
     let fixture = GitFixture::new();
     let base = fixture.commit("base", "base", 1_700_000_000);
     fixture.push_head(&fixture.remote_a, "main");
@@ -146,38 +146,13 @@ fn branch_decisions_report_divergent_tips_without_force() {
 
     let mirror = fixture.mirror();
     fixture.fetch_all(&mirror);
-    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes()).unwrap();
 
     assert!(decisions.is_empty());
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0].branch, "main");
     assert!(conflicts[0].tips.iter().any(|(_, sha)| sha == &a_tip));
     assert!(conflicts[0].tips.iter().any(|(_, sha)| sha == &b_tip));
-}
-
-#[test]
-fn branch_decisions_force_selects_newest_divergent_tip() {
-    let fixture = GitFixture::new();
-    let base = fixture.commit("base", "base", 1_700_000_000);
-    fixture.push_head(&fixture.remote_a, "main");
-    fixture.push_head(&fixture.remote_b, "main");
-
-    let older = fixture.commit("older", "older", 1_700_000_100);
-    fixture.push_head(&fixture.remote_a, "main");
-    fixture.reset_hard(&base);
-    let newer = fixture.commit("newer", "newer", 1_700_000_200);
-    fixture.push_head(&fixture.remote_b, "main");
-
-    let mirror = fixture.mirror();
-    fixture.fetch_all(&mirror);
-    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes(), true).unwrap();
-
-    assert!(conflicts.is_empty());
-    let main = find_branch(&decisions, "main");
-    assert_eq!(main.sha, newer);
-    assert_ne!(main.sha, older);
-    assert_eq!(main.source_remotes, vec!["b".to_string()]);
-    assert_eq!(main.target_remotes, vec!["a".to_string()]);
 }
 
 #[test]
@@ -195,7 +170,7 @@ fn auto_rebase_branch_conflict_replays_later_tip_and_marks_force_targets() {
 
     let mirror = fixture.mirror();
     fixture.fetch_all(&mirror);
-    let (_, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+    let (_, conflicts) = mirror.branch_decisions(&fixture.remotes()).unwrap();
 
     let decision = mirror
         .auto_rebase_branch_conflict(&fixture.remotes(), "main", &conflicts[0].tips)
@@ -247,7 +222,7 @@ fn auto_rebase_branch_conflict_fails_on_file_conflict() {
 
     let mirror = fixture.mirror();
     fixture.fetch_all(&mirror);
-    let (_, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+    let (_, conflicts) = mirror.branch_decisions(&fixture.remotes()).unwrap();
 
     let error = mirror
         .auto_rebase_branch_conflict(&fixture.remotes(), "main", &conflicts[0].tips)
@@ -265,10 +240,10 @@ fn push_branches_creates_missing_branch_on_other_remotes() {
 
     let mirror = fixture.mirror();
     fixture.fetch_all(&mirror);
-    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes(), false).unwrap();
+    let (decisions, conflicts) = mirror.branch_decisions(&fixture.remotes()).unwrap();
     assert!(conflicts.is_empty());
     mirror
-        .push_branches(&fixture.remotes(), &decisions, false)
+        .push_branches(&fixture.remotes(), &decisions)
         .unwrap();
 
     assert_eq!(

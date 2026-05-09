@@ -41,7 +41,6 @@ pub struct SyncOptions {
     pub group: Option<String>,
     pub dry_run: bool,
     pub create_missing_override: Option<bool>,
-    pub force_override: Option<bool>,
     pub repo_pattern: Option<String>,
     pub retry_failed: bool,
     pub work_dir: Option<PathBuf>,
@@ -54,7 +53,6 @@ impl Default for SyncOptions {
             group: None,
             dry_run: false,
             create_missing_override: None,
-            force_override: None,
             repo_pattern: None,
             retry_failed: false,
             work_dir: None,
@@ -97,7 +95,7 @@ pub fn sync_all(config: &Config, options: SyncOptions) -> Result<()> {
         .as_deref()
         .map(Regex::new)
         .transpose()
-        .with_context(|| "invalid --repo-pattern regex")?;
+        .with_context(|| "invalid repository filter regex")?;
     let retry_failed_repos = if options.retry_failed {
         Some(load_failure_state(&work_dir)?.repos_by_group())
     } else {
@@ -163,7 +161,6 @@ fn sync_group(
         .options
         .create_missing_override
         .unwrap_or(mirror.create_missing);
-    let allow_force = context.options.force_override.unwrap_or(mirror.allow_force);
     let repo_filter = mirror.repo_filter()?;
 
     let all_endpoint_repos = list_group_repos(context.config, mirror, &repo_filter)?;
@@ -283,7 +280,6 @@ fn sync_group(
                         work_dir,
                         redactor: redactor.clone(),
                         dry_run,
-                        allow_force,
                     };
                     let result = sync_repo(
                         &repo_context,
@@ -511,7 +507,6 @@ struct RepoSyncContext<'a> {
     work_dir: &'a Path,
     redactor: Redactor,
     dry_run: bool,
-    allow_force: bool,
 }
 
 #[derive(Default)]
@@ -890,7 +885,7 @@ fn push_repo_refs(
         fail_on_unresolved_conflict(context, "branch deletion conflict")?;
     }
 
-    let (branches, conflicts) = mirror_repo.branch_decisions(remotes, context.allow_force)?;
+    let (branches, conflicts) = mirror_repo.branch_decisions(remotes)?;
     let branches_to_push = branches
         .into_iter()
         .filter(|branch| !is_internal_conflict_branch(&branch.branch))
@@ -992,7 +987,7 @@ fn push_repo_refs(
     }
     if !branches_to_push.is_empty() {
         print_branch_decisions(&branches_to_push);
-        mirror_repo.push_branches(remotes, &branches_to_push, context.allow_force)?;
+        mirror_repo.push_branches(remotes, &branches_to_push)?;
         close_resolved_pull_requests(context, mirror_repo, remotes, repos, &pushed_branch_names)?;
     }
     if !rebased_branch_updates.is_empty() {

@@ -26,7 +26,6 @@ fn parses_token_forms() {
         repo_blacklist = ["-archive$"]
         create_missing = true
         visibility = "private"
-        allow_force = false
         conflict_resolution = "auto_rebase_pull_request"
 
         [[mirrors.endpoints]]
@@ -92,7 +91,6 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -122,7 +120,6 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -245,7 +242,6 @@ fn mirror_config() -> MirrorConfig {
         repo_blacklist: Vec::new(),
         create_missing: true,
         visibility: Visibility::Private,
-        allow_force: false,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     }
 }

@@ -116,7 +116,6 @@ fn matches_jobs_by_provider_and_namespace() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -144,7 +143,6 @@ fn matching_jobs_respects_repo_name_filters() {
         repo_blacklist: vec!["-archive$".to_string()],
         create_missing: true,
         visibility: Visibility::Private,
-        allow_force: false,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     };
     let config = Config {

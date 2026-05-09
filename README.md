@@ -73,7 +73,6 @@ repo_whitelist = ["^important-"]
 repo_blacklist = ["-archive$"]
 create_missing = true
 visibility = "private"
-allow_force = false
 conflict_resolution = "auto_rebase_pull_request"
 
 [[mirrors.endpoints]]
@@ -111,13 +110,13 @@ Preview commands without writing to Git remotes:
 refray sync --dry-run
 ```
 
-Sync only repositories whose names match a regex:
+Skip repository creation even when `create_missing = true` in the mirror group:
 
 ```sh
-refray sync --repo-pattern '^(foo|bar)-'
+refray sync --no-create
 ```
 
-For persistent per-group filters, set `repo_whitelist` and/or `repo_blacklist` in the config instead. `--repo-pattern` is an extra one-off filter applied on top of the group config.
+To restrict which repositories sync, set `repo_whitelist` and/or `repo_blacklist` on the mirror group in config.
 
 Retry only repositories that failed during the previous non-dry-run sync:
 
@@ -194,7 +193,6 @@ Branch conflict handling is intentionally conservative:
 - If all endpoints agree on a branch tip, that tip is pushed everywhere.
 - If one branch tip is a descendant of the others, the descendant wins and is pushed everywhere.
 - If branch tips diverged, `conflict_resolution` controls what happens.
-- If `allow_force = true` or `refray sync --force` is used, a diverged branch chooses the newest commit timestamp and force-pushes it.
 
 Conflict resolution strategies are configured per mirror group:
 

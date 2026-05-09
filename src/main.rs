@@ -49,24 +49,18 @@ struct SyncCommand {
     group: Option<String>,
     #[arg(long)]
     dry_run: bool,
+    /// Do not create repositories that are missing from an endpoint.
     #[arg(long)]
     no_create: bool,
-    #[arg(long)]
-    force: bool,
-    #[arg(long, value_name = "REGEX")]
-    repo_pattern: Option<String>,
+    /// Sync only repositories that failed during the previous non-dry-run sync.
     #[arg(long)]
     retry_failed: bool,
-    #[arg(long, value_name = "PATH")]
-    work_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
 struct ServeCommand {
     #[arg(long, default_value = "127.0.0.1:8787", value_name = "HOST:PORT")]
     listen: String,
-    #[arg(long, value_name = "PATH")]
-    work_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -96,8 +90,6 @@ struct WebhookUpdateCommand {
     url: String,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, value_name = "PATH")]
-    work_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -127,11 +119,9 @@ fn main() -> Result<()> {
                     group: command.group,
                     dry_run: command.dry_run,
                     create_missing_override: command.no_create.then_some(false),
-                    force_override: command.force.then_some(true),
-                    repo_pattern: command.repo_pattern,
                     retry_failed: command.retry_failed,
-                    work_dir: command.work_dir,
                     jobs: config.jobs,
+                    ..SyncOptions::default()
                 },
             )
         }
@@ -154,7 +144,7 @@ fn main() -> Result<()> {
                     listen: command.listen,
                     secret,
                     workers,
-                    work_dir: command.work_dir,
+                    work_dir: None,
                     full_sync_interval_minutes,
                     reachability_url,
                     reachability_check_interval_minutes,
@@ -206,7 +196,7 @@ fn main() -> Result<()> {
                     new_url: command.url.clone(),
                     secret,
                     dry_run: command.dry_run,
-                    work_dir: command.work_dir,
+                    work_dir: None,
                     jobs: config.jobs,
                 },
             )?;

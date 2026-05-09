@@ -21,21 +21,14 @@ fn cli_rejects_removed_config_subcommands() {
 }
 
 #[test]
-fn cli_accepts_sync_repo_pattern() {
-    let cli = Cli::try_parse_from([
-        "refray",
-        "sync",
-        "--repo-pattern",
-        "^(foo|bar)-",
-        "--dry-run",
-    ])
-    .unwrap();
-
-    let Command::Sync(args) = cli.command else {
-        panic!("parsed unexpected command");
-    };
-    assert_eq!(args.repo_pattern, Some("^(foo|bar)-".to_string()));
-    assert!(args.dry_run);
+fn cli_rejects_removed_sync_args() {
+    for args in [
+        ["refray", "sync", "--repo-pattern", "^(foo|bar)-"].as_slice(),
+        ["refray", "sync", "--work-dir", "/tmp/refray"].as_slice(),
+        ["refray", "sync", "--force"].as_slice(),
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
@@ -85,6 +78,7 @@ fn cli_rejects_removed_serve_args() {
         ["refray", "serve", "--secret", "secret"].as_slice(),
         ["refray", "serve", "--secret-env", "WEBHOOK_SECRET"].as_slice(),
         ["refray", "serve", "--full-sync-interval-minutes", "30"].as_slice(),
+        ["refray", "serve", "--work-dir", "/tmp/refray"].as_slice(),
     ] {
         assert!(Cli::try_parse_from(args).is_err());
     }
@@ -260,6 +254,15 @@ fn cli_rejects_removed_webhook_update_secret_args() {
             "https://new.example.test/webhook",
             "--secret-env",
             "WEBHOOK_SECRET",
+        ]
+        .as_slice(),
+        [
+            "refray",
+            "webhook",
+            "update",
+            "https://new.example.test/webhook",
+            "--work-dir",
+            "/tmp/refray",
         ]
         .as_slice(),
     ] {

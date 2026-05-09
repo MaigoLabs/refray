@@ -413,7 +413,6 @@ fn test_mirror() -> MirrorConfig {
         repo_blacklist: Vec::new(),
         create_missing: true,
         visibility: crate::config::Visibility::Private,
-        allow_force: false,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     }
 }

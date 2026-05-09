@@ -126,7 +126,6 @@ fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<(
         repo_blacklist: repo_filters.blacklist,
         create_missing: true,
         visibility: Visibility::Private,
-        allow_force: false,
         conflict_resolution,
     });
     prompt_webhook_setup_styled(config, theme)?;

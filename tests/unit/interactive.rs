@@ -47,7 +47,6 @@ fn wizard_builds_sync_group_from_profile_urls() {
     assert_eq!(config.mirrors[0].sync_visibility, SyncVisibility::All);
     assert!(config.mirrors[0].create_missing);
     assert_eq!(config.mirrors[0].visibility, Visibility::Private);
-    assert!(!config.mirrors[0].allow_force);
     assert_eq!(
         config.mirrors[0].conflict_resolution,
         ConflictResolutionStrategy::AutoRebasePullRequest
@@ -216,7 +215,6 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -246,7 +244,6 @@ fn wizard_can_ask_to_run_full_sync_after_config() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -323,7 +320,6 @@ fn wizard_edits_existing_sync_group_from_menu() {
             repo_blacklist: vec!["-archive$".to_string()],
             create_missing: false,
             visibility: Visibility::Public,
-            allow_force: true,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -364,8 +360,6 @@ fn wizard_edits_existing_sync_group_from_menu() {
     assert_eq!(mirror.repo_whitelist, vec!["^public-".to_string()]);
     assert_eq!(mirror.repo_blacklist, vec!["-skip$".to_string()]);
     assert_eq!(mirror.visibility, Visibility::Public);
-    assert!(mirror.allow_force);
-
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("Edit sync group"));
     assert!(output.contains("updated sync group 1"));
@@ -413,7 +407,6 @@ fn wizard_prefills_existing_sync_group_when_editing() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -478,7 +471,6 @@ fn wizard_deletes_existing_sync_group_from_menu() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
@@ -538,7 +530,6 @@ fn wizard_can_go_back_from_delete_menu() {
             repo_blacklist: Vec::new(),
             create_missing: true,
             visibility: Visibility::Private,
-            allow_force: false,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,

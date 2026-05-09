@@ -41,8 +41,6 @@ fn sequential_live_e2e_all_supported_features() -> Result<()> {
     run.failed_sync_can_retry_only_failed_repo()?;
     eprintln!("e2e phase: auto rebase");
     run.auto_rebase_resolves_non_conflicting_divergence()?;
-    eprintln!("e2e phase: force sync");
-    run.force_sync_chooses_newest_divergent_commit()?;
     eprintln!("e2e phase: pull-request conflicts");
     run.pull_request_strategy_pushes_conflict_branches()?;
     eprintln!("e2e phase: auto-rebase PR fallback");
@@ -206,7 +204,7 @@ fn clear_all_repos_enabled(env: &EnvFile) -> Result<bool> {
 struct E2eRun {
     temp: TempDir,
     config_path: PathBuf,
-    work_dir: PathBuf,
+    cache_home: PathBuf,
     settings: E2eSettings,
     redactor: Redactor,
     run_id: String,
@@ -216,7 +214,7 @@ impl E2eRun {
     fn new(settings: E2eSettings) -> Result<Self> {
         let temp = tempfile::tempdir().context("failed to create e2e temp dir")?;
         let config_path = temp.path().join("config.toml");
-        let work_dir = temp.path().join("work");
+        let cache_home = temp.path().join("cache");
         let redactor = Redactor::new(settings.secrets());
         let run_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -225,7 +223,7 @@ impl E2eRun {
         Ok(Self {
             temp,
             config_path,
-            work_dir,
+            cache_home,
             settings,
             redactor,
             run_id,
@@ -298,21 +296,21 @@ impl E2eRun {
     fn write_config(
         &self,
         conflict_mode: ConflictMode,
-        repo_pattern: Option<&str>,
+        whitelist_pattern: Option<&str>,
         create_missing: bool,
     ) -> Result<()> {
-        self.write_config_for_sites(conflict_mode, repo_pattern, create_missing, None)
+        self.write_config_for_sites(conflict_mode, whitelist_pattern, create_missing, None)
     }
 
     fn write_config_for_sites(
         &self,
         conflict_mode: ConflictMode,
-        repo_pattern: Option<&str>,
+        whitelist_pattern: Option<&str>,
         create_missing: bool,
         endpoint_sites: Option<&[&str]>,
     ) -> Result<()> {
         let default_whitelist = format!("^{REPO_PREFIX}{}-", self.run_id);
-        let whitelist = repo_pattern.unwrap_or(&default_whitelist);
+        let whitelist = whitelist_pattern.unwrap_or(&default_whitelist);
         let mut contents = "jobs = 1\n\n".to_string();
         for provider in &self.settings.providers {
             contents.push_str(&format!(
@@ -341,7 +339,6 @@ sync_visibility = "all"
 repo_whitelist = ['{}']
 create_missing = {}
 visibility = "public"
-allow_force = false
 conflict_resolution = "{}"
 
 "#,
@@ -390,7 +387,7 @@ namespace = "{}"
         )?;
 
         source.wait_repo_listed(&repo)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.assert_branch_all_equal_after_optional_resync(&repo, MAIN_BRANCH)?;
         self.assert_branch_all_equal(&repo, "feature/github")?;
         self.assert_tag_all_equal(&repo, "v1.0.0")?;
@@ -410,7 +407,7 @@ namespace = "{}"
             &git_output(&work, ["rev-parse", "HEAD"])?,
         )?;
         peer.wait_repo_listed(&repo)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.assert_branch_all_equal_after_optional_resync(&repo, MAIN_BRANCH)?;
         Ok(())
     }
@@ -421,10 +418,10 @@ namespace = "{}"
         source.create_repo(&repo)?;
         self.seed_main(source, &repo, "dry run", 1_700_000_201)?;
 
-        self.sync(["--repo-pattern", &exact_pattern(&repo), "--dry-run"])?;
+        self.sync_repo(&repo, ["--dry-run"])?;
         self.assert_only_provider_has_repo(&repo, &source.site_name)?;
 
-        self.sync(["--repo-pattern", &exact_pattern(&repo), "--no-create"])?;
+        self.sync_repo(&repo, ["--no-create"])?;
         self.assert_only_provider_has_repo(&repo, &source.site_name)?;
         Ok(())
     }
@@ -433,13 +430,13 @@ namespace = "{}"
         let repo = self.repo_name("retry");
         let (source, peer) = self.provider_pair();
         self.seed_all_main(&repo, "retry base", 1_700_000_301)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.unprotect_main_all(&repo)?;
 
         self.commit_to_provider(
             source,
             &repo,
-            "retry.txt",
+            "source-retry.txt",
             "source\n",
             "source retry",
             1_700_000_401,
@@ -447,14 +444,15 @@ namespace = "{}"
         self.commit_to_provider(
             peer,
             &repo,
-            "retry.txt",
+            "peer-retry.txt",
             "peer\n",
             "peer retry",
             1_700_000_402,
         )?;
         self.write_config(ConflictMode::Fail, Some(&exact_pattern(&repo)), true)?;
-        self.sync_expect_failure(["--repo-pattern", &exact_pattern(&repo)])?;
-        self.sync(["--retry-failed", "--force"])?;
+        self.sync_repo_expect_failure(&repo, [])?;
+        self.write_config(ConflictMode::AutoRebase, Some(&exact_pattern(&repo)), true)?;
+        self.sync(["--retry-failed"])?;
         self.assert_branch_all_equal(&repo, MAIN_BRANCH)?;
         self.write_config(ConflictMode::AutoRebasePullRequest, None, true)?;
         Ok(())
@@ -464,7 +462,7 @@ namespace = "{}"
         let repo = self.repo_name("rebase");
         let (source, peer) = self.provider_pair();
         self.seed_all_main(&repo, "rebase base", 1_700_000_501)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.unprotect_main_all(&repo)?;
 
         self.commit_to_provider(
@@ -493,42 +491,11 @@ namespace = "{}"
         Ok(())
     }
 
-    fn force_sync_chooses_newest_divergent_commit(&self) -> Result<()> {
-        let repo = self.repo_name("force");
-        let (source, peer) = self.provider_pair();
-        self.seed_all_main(&repo, "force base", 1_700_000_701)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
-        self.unprotect_main_all(&repo)?;
-
-        self.commit_to_provider(
-            source,
-            &repo,
-            "force.txt",
-            "old\n",
-            "old force",
-            1_700_000_801,
-        )?;
-        self.commit_to_provider(
-            peer,
-            &repo,
-            "force.txt",
-            "new\n",
-            "new force",
-            1_700_000_901,
-        )?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo), "--force"])?;
-        self.assert_branch_all_equal(&repo, MAIN_BRANCH)?;
-        let clone = self.clone_repo(source, &repo, "force-verify")?;
-        let contents = fs::read_to_string(clone.join("force.txt"))?;
-        assert_eq!(contents, "new\n");
-        Ok(())
-    }
-
     fn pull_request_strategy_pushes_conflict_branches(&self) -> Result<()> {
         let repo = self.repo_name("pull-request");
         let (source, peer) = self.provider_pair();
         self.seed_all_main(&repo, "pr base", 1_700_001_001)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.unprotect_main_all(&repo)?;
 
         self.commit_to_provider(
@@ -564,7 +531,7 @@ namespace = "{}"
         let repo = self.repo_name("fallback");
         let (source, peer) = self.provider_pair();
         self.seed_all_main(&repo, "fallback base", 1_700_001_201)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.unprotect_main_all(&repo)?;
 
         self.commit_to_provider(
@@ -615,13 +582,13 @@ namespace = "{}"
             "delete-me",
             &git_output(&work, ["rev-parse", "HEAD"])?,
         )?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         source.wait_repo_listed(&repo)?;
         self.assert_branch_all_equal(&repo, "delete-me")?;
 
         self.git(&work, ["push", "origin", ":refs/heads/delete-me"])?;
         source.wait_branch_absent(&repo, "delete-me")?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.assert_branch_absent_everywhere(&repo, "delete-me")?;
         Ok(())
     }
@@ -630,12 +597,12 @@ namespace = "{}"
         let repo = self.repo_name("repo-delete");
         let source = self.primary_provider();
         self.seed_all_main(&repo, "repo delete base", 1_700_001_501)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.assert_repo_exists_everywhere(&repo)?;
 
         source.delete_repo(&repo)?;
         source.wait_repo_absent(&repo)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
         self.assert_repo_absent_everywhere(&repo)?;
         Ok(())
     }
@@ -644,7 +611,7 @@ namespace = "{}"
         let repo = self.repo_name("webhook");
         let source = self.primary_provider();
         self.seed_all_main(&repo, "webhook base", 1_700_001_601)?;
-        self.sync(["--repo-pattern", &exact_pattern(&repo)])?;
+        self.sync_repo(&repo, [])?;
 
         self.refray(["webhook", "install", "--dry-run"])?;
         self.refray(["webhook", "uninstall", "--dry-run"])?;
@@ -785,20 +752,58 @@ namespace = "{}"
         assert_output_success(output, "git", &self.redactor)
     }
 
+    fn set_repo_whitelist(&self, pattern: &str) -> Result<()> {
+        let contents = fs::read_to_string(&self.config_path)
+            .with_context(|| format!("failed to read {}", self.config_path.display()))?;
+        let escaped_pattern = pattern.replace('\'', "''");
+        let replacement = format!("repo_whitelist = ['{escaped_pattern}']");
+        let mut replaced = false;
+        let mut updated = contents
+            .lines()
+            .map(|line| {
+                if line.starts_with("repo_whitelist = ") {
+                    replaced = true;
+                    replacement.clone()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if contents.ends_with('\n') {
+            updated.push('\n');
+        }
+        if !replaced {
+            bail!("config is missing repo_whitelist");
+        }
+        fs::write(&self.config_path, updated)
+            .with_context(|| format!("failed to write {}", self.config_path.display()))
+    }
+
     fn sync<const N: usize>(&self, args: [&str; N]) -> Result<()> {
-        let mut command = vec!["sync", "--work-dir", self.work_dir.to_str().unwrap()];
+        let mut command = vec!["sync"];
         command.extend(args);
         self.refray(command)
     }
 
+    fn sync_repo<const N: usize>(&self, repo: &str, args: [&str; N]) -> Result<()> {
+        self.set_repo_whitelist(&exact_pattern(repo))?;
+        self.sync(args)
+    }
+
     fn sync_expect_failure<const N: usize>(&self, args: [&str; N]) -> Result<()> {
-        let mut command = vec!["sync", "--work-dir", self.work_dir.to_str().unwrap()];
+        let mut command = vec!["sync"];
         command.extend(args);
         let output = self.refray_output(command)?;
         if output.status.success() {
             bail!("expected refray sync to fail, but it succeeded");
         }
         Ok(())
+    }
+
+    fn sync_repo_expect_failure<const N: usize>(&self, repo: &str, args: [&str; N]) -> Result<()> {
+        self.set_repo_whitelist(&exact_pattern(repo))?;
+        self.sync_expect_failure(args)
     }
 
     fn refray<I, S>(&self, args: I) -> Result<()>
@@ -834,6 +839,7 @@ namespace = "{}"
         }
         command
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("XDG_CACHE_HOME", &self.cache_home)
             .output()
             .context("failed to run refray")
     }
@@ -844,6 +850,7 @@ namespace = "{}"
         command.args(args);
         command
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("XDG_CACHE_HOME", &self.cache_home)
             .spawn()
             .context("failed to spawn refray")
     }
@@ -938,7 +945,7 @@ namespace = "{}"
             Ok(()) => Ok(()),
             Err(first_error) => {
                 thread::sleep(Duration::from_secs(2));
-                self.sync(["--repo-pattern", &exact_pattern(repo)])
+                self.sync_repo(repo, [])
                     .with_context(|| format!("initial convergence failed: {first_error:#}"))?;
                 self.assert_branch_all_equal(repo, branch)
             }
