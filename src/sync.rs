@@ -9,7 +9,7 @@ use console::style;
 use regex::Regex;
 
 use crate::config::{
-    Config, ConflictResolutionStrategy, EndpointConfig, MirrorConfig, RepoNameFilter,
+    Config, ConflictResolutionStrategy, DEFAULT_JOBS, EndpointConfig, MirrorConfig, RepoNameFilter,
     SyncVisibility, default_work_dir, validate_config,
 };
 use crate::git::{
@@ -34,7 +34,6 @@ use self::state::{
     save_failure_state, save_ref_state,
 };
 
-pub const DEFAULT_JOBS: usize = 4;
 const CONFLICT_BRANCH_ROOT: &str = "refray/conflicts/";
 
 #[derive(Clone, Debug)]
@@ -67,7 +66,7 @@ impl Default for SyncOptions {
 pub fn sync_all(config: &Config, options: SyncOptions) -> Result<()> {
     validate_config(config)?;
     if options.jobs == 0 {
-        bail!("--jobs must be at least 1");
+        bail!("jobs must be at least 1");
     }
     let work_dir = options.work_dir.clone().unwrap_or_else(default_work_dir);
     fs::create_dir_all(&work_dir)

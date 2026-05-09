@@ -9,9 +9,12 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "refray";
+pub const DEFAULT_JOBS: usize = 4;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default = "default_jobs", skip_serializing_if = "is_default_jobs")]
+    pub jobs: usize,
     #[serde(default)]
     pub sites: Vec<SiteConfig>,
     #[serde(default)]
@@ -88,6 +91,17 @@ pub struct WebhookConfig {
     pub full_sync_interval_minutes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachability_check_interval_minutes: Option<u64>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            jobs: DEFAULT_JOBS,
+            sites: Vec::new(),
+            mirrors: Vec::new(),
+            webhook: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -174,6 +188,14 @@ fn compile_repo_patterns(mirror: &str, field: &str, patterns: &[String]) -> Resu
 
 fn default_true() -> bool {
     true
+}
+
+fn default_jobs() -> usize {
+    DEFAULT_JOBS
+}
+
+fn is_default_jobs(jobs: &usize) -> bool {
+    *jobs == DEFAULT_JOBS
 }
 
 impl Config {
@@ -321,6 +343,9 @@ fn protect_file(_path: &Path) -> Result<()> {
 }
 
 pub fn validate_config(config: &Config) -> Result<()> {
+    if config.jobs == 0 {
+        bail!("jobs must be at least 1");
+    }
     if config.sites.is_empty() {
         bail!("no sites configured");
     }

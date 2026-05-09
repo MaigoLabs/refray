@@ -313,7 +313,7 @@ impl E2eRun {
     ) -> Result<()> {
         let default_whitelist = format!("^{REPO_PREFIX}{}-", self.run_id);
         let whitelist = repo_pattern.unwrap_or(&default_whitelist);
-        let mut contents = String::new();
+        let mut contents = "jobs = 1\n\n".to_string();
         for provider in &self.settings.providers {
             contents.push_str(&format!(
                 r#"[[sites]]
@@ -658,15 +658,7 @@ namespace = "{}"
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         drop(listener);
-        let mut server = self.spawn_refray([
-            "serve",
-            "--listen",
-            &addr.to_string(),
-            "--secret",
-            WEBHOOK_SECRET,
-            "--jobs",
-            "1",
-        ])?;
+        let mut server = self.spawn_refray(["serve", "--listen", &addr.to_string()])?;
         thread::sleep(Duration::from_millis(750));
 
         let (body, headers) = source.webhook_payload(&repo, WEBHOOK_SECRET);
@@ -794,25 +786,13 @@ namespace = "{}"
     }
 
     fn sync<const N: usize>(&self, args: [&str; N]) -> Result<()> {
-        let mut command = vec![
-            "sync",
-            "--work-dir",
-            self.work_dir.to_str().unwrap(),
-            "--jobs",
-            "1",
-        ];
+        let mut command = vec!["sync", "--work-dir", self.work_dir.to_str().unwrap()];
         command.extend(args);
         self.refray(command)
     }
 
     fn sync_expect_failure<const N: usize>(&self, args: [&str; N]) -> Result<()> {
-        let mut command = vec![
-            "sync",
-            "--work-dir",
-            self.work_dir.to_str().unwrap(),
-            "--jobs",
-            "1",
-        ];
+        let mut command = vec!["sync", "--work-dir", self.work_dir.to_str().unwrap()];
         command.extend(args);
         let output = self.refray_output(command)?;
         if output.status.success() {

@@ -7,14 +7,13 @@ mod state;
 mod sync;
 mod webhook;
 
-use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{Config, default_config_path};
-use crate::sync::{DEFAULT_JOBS, SyncOptions, sync_all};
+use crate::sync::{SyncOptions, sync_all};
 use crate::webhook::{
     ServeOptions, WebhookInstallOptions, WebhookUninstallOptions, WebhookUpdateOptions,
     install_webhooks, serve, uninstall_webhooks, update_webhooks,
@@ -60,24 +59,14 @@ struct SyncCommand {
     retry_failed: bool,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
-    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
-    jobs: usize,
 }
 
 #[derive(Args, Debug)]
 struct ServeCommand {
     #[arg(long, default_value = "127.0.0.1:8787", value_name = "HOST:PORT")]
     listen: String,
-    #[arg(long, conflicts_with = "secret_env")]
-    secret: Option<String>,
-    #[arg(long, value_name = "ENV", conflicts_with = "secret")]
-    secret_env: Option<String>,
-    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
-    jobs: usize,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
-    #[arg(long, value_name = "MINUTES")]
-    full_sync_interval_minutes: Option<u64>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -91,16 +80,14 @@ enum WebhookCommand {
 struct WebhookInstallCommand {
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
-    jobs: usize,
 }
 
 #[derive(Args, Debug)]
 struct WebhookUninstallCommand {
+    #[arg(value_name = "URL", value_parser = parse_webhook_url)]
+    url: Option<String>,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
-    jobs: usize,
 }
 
 #[derive(Args, Debug)]
@@ -111,8 +98,6 @@ struct WebhookUpdateCommand {
     dry_run: bool,
     #[arg(long, value_name = "PATH")]
     work_dir: Option<PathBuf>,
-    #[arg(long, default_value_t = DEFAULT_JOBS, value_name = "N")]
-    jobs: usize,
 }
 
 fn main() -> Result<()> {
@@ -123,7 +108,13 @@ fn main() -> Result<()> {
         Command::Config => {
             let outcome = interactive::run_config_wizard(&config_path)?;
             if outcome.run_full_sync_now {
-                sync_all(&outcome.config, SyncOptions::default())
+                sync_all(
+                    &outcome.config,
+                    SyncOptions {
+                        jobs: outcome.config.jobs,
+                        ..SyncOptions::default()
+                    },
+                )
             } else {
                 Ok(())
             }
@@ -140,30 +131,29 @@ fn main() -> Result<()> {
                     repo_pattern: command.repo_pattern,
                     retry_failed: command.retry_failed,
                     work_dir: command.work_dir,
-                    jobs: command.jobs,
+                    jobs: config.jobs,
                 },
             )
         }
         Command::Serve(command) => {
             let config = load_config(&config_path)?;
-            let full_sync_interval_minutes = command.full_sync_interval_minutes.or_else(|| {
-                config
-                    .webhook
-                    .as_ref()
-                    .and_then(|webhook| webhook.full_sync_interval_minutes)
-            });
+            let full_sync_interval_minutes = config
+                .webhook
+                .as_ref()
+                .and_then(|webhook| webhook.full_sync_interval_minutes);
             let reachability_url = config.webhook.as_ref().map(|webhook| webhook.url.clone());
             let reachability_check_interval_minutes = config
                 .webhook
                 .as_ref()
                 .and_then(|webhook| webhook.reachability_check_interval_minutes);
-            let secret = resolve_webhook_secret(&config, command.secret, command.secret_env)?;
+            let secret = resolve_config_webhook_secret(&config)?;
+            let workers = config.jobs;
             serve(
                 config,
                 ServeOptions {
                     listen: command.listen,
                     secret,
-                    workers: command.jobs,
+                    workers,
                     work_dir: command.work_dir,
                     full_sync_interval_minutes,
                     reachability_url,
@@ -182,20 +172,20 @@ fn main() -> Result<()> {
                     secret,
                     dry_run: command.dry_run,
                     work_dir: None,
-                    jobs: command.jobs,
+                    jobs: config.jobs,
                 },
             )
         }
         Command::Webhook(WebhookCommand::Uninstall(command)) => {
             let config = load_config(&config_path)?;
-            let url = resolve_config_webhook_url(&config)?;
+            let url = resolve_uninstall_webhook_url(&config, command.url)?;
             uninstall_webhooks(
                 &config,
                 WebhookUninstallOptions {
                     url,
                     dry_run: command.dry_run,
                     work_dir: None,
-                    jobs: command.jobs,
+                    jobs: config.jobs,
                 },
             )
         }
@@ -217,7 +207,7 @@ fn main() -> Result<()> {
                     secret,
                     dry_run: command.dry_run,
                     work_dir: command.work_dir,
-                    jobs: command.jobs,
+                    jobs: config.jobs,
                 },
             )?;
             if !command.dry_run {
@@ -246,27 +236,8 @@ fn resolve_config_webhook_secret(config: &Config) -> Result<String> {
         .map(|webhook| webhook.secret())
         .transpose()?
         .ok_or_else(|| {
-            anyhow::anyhow!("configure [webhook].secret before running webhook commands")
+            anyhow::anyhow!("configure [webhook].secret before running serve or webhook commands")
         })
-}
-
-fn resolve_webhook_secret(
-    config: &Config,
-    value: Option<String>,
-    env_name: Option<String>,
-) -> Result<String> {
-    match (value, env_name) {
-        (Some(value), None) => Ok(value),
-        (None, Some(env_name)) => env::var(&env_name)
-            .with_context(|| format!("environment variable {env_name} is not set")),
-        (None, None) => config
-            .webhook
-            .as_ref()
-            .map(|webhook| webhook.secret())
-            .transpose()?
-            .ok_or_else(|| anyhow::anyhow!("pass either --secret or --secret-env")),
-        (Some(_), Some(_)) => unreachable!("clap enforces secret conflicts"),
-    }
 }
 
 fn resolve_config_webhook_url(config: &Config) -> Result<String> {
@@ -275,6 +246,24 @@ fn resolve_config_webhook_url(config: &Config) -> Result<String> {
         .as_ref()
         .map(|webhook| webhook.url.clone())
         .ok_or_else(|| anyhow::anyhow!("configure [webhook].url before running webhook commands"))
+}
+
+fn resolve_uninstall_webhook_url(config: &Config, url: Option<String>) -> Result<String> {
+    match url {
+        Some(url) => Ok(url),
+        None => resolve_config_webhook_url(config),
+    }
+}
+
+fn parse_webhook_url(value: &str) -> std::result::Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("A value is required".to_string());
+    }
+    let url = url::Url::parse(value).map_err(|error| format!("Invalid URL: {error}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(value.to_string()),
+        _ => Err("URL must start with http:// or https://".to_string()),
+    }
 }
 
 fn set_config_webhook_url(config: &mut Config, url: String) {

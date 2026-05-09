@@ -49,48 +49,55 @@ fn cli_accepts_sync_retry_failed() {
 }
 
 #[test]
-fn cli_accepts_sync_jobs() {
-    let cli = Cli::try_parse_from(["refray", "sync", "--jobs", "8"]).unwrap();
-
-    let Command::Sync(args) = cli.command else {
-        panic!("parsed unexpected command");
-    };
-    assert_eq!(args.jobs, 8);
-}
-
-#[test]
 fn cli_accepts_webhook_serve() {
-    let cli = Cli::try_parse_from([
-        "refray",
-        "serve",
-        "--listen",
-        "127.0.0.1:9000",
-        "--secret-env",
-        "WEBHOOK_SECRET",
-        "--jobs",
-        "2",
-        "--full-sync-interval-minutes",
-        "30",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["refray", "serve", "--listen", "127.0.0.1:9000"]).unwrap();
 
     let Command::Serve(args) = cli.command else {
         panic!("parsed unexpected command");
     };
     assert_eq!(args.listen, "127.0.0.1:9000");
-    assert_eq!(args.secret_env, Some("WEBHOOK_SECRET".to_string()));
-    assert_eq!(args.jobs, 2);
-    assert_eq!(args.full_sync_interval_minutes, Some(30));
+}
+
+#[test]
+fn cli_rejects_removed_jobs_args() {
+    for args in [
+        ["refray", "sync", "--jobs", "8"].as_slice(),
+        ["refray", "serve", "--jobs", "2"].as_slice(),
+        ["refray", "webhook", "install", "--jobs", "6"].as_slice(),
+        ["refray", "webhook", "uninstall", "--jobs", "3"].as_slice(),
+        [
+            "refray",
+            "webhook",
+            "update",
+            "https://new.example.test/webhook",
+            "--jobs",
+            "5",
+        ]
+        .as_slice(),
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn cli_rejects_removed_serve_args() {
+    for args in [
+        ["refray", "serve", "--secret", "secret"].as_slice(),
+        ["refray", "serve", "--secret-env", "WEBHOOK_SECRET"].as_slice(),
+        ["refray", "serve", "--full-sync-interval-minutes", "30"].as_slice(),
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
 fn cli_accepts_webhook_install() {
-    let cli = Cli::try_parse_from(["refray", "webhook", "install", "--jobs", "6"]).unwrap();
+    let cli = Cli::try_parse_from(["refray", "webhook", "install"]).unwrap();
 
     let Command::Webhook(WebhookCommand::Install(args)) = cli.command else {
         panic!("parsed unexpected command");
     };
-    assert_eq!(args.jobs, 6);
+    assert!(!args.dry_run);
 }
 
 #[test]
@@ -124,20 +131,37 @@ fn cli_rejects_removed_webhook_install_args() {
 
 #[test]
 fn cli_accepts_webhook_uninstall() {
-    let cli = Cli::try_parse_from(["refray", "webhook", "uninstall", "--dry-run", "--jobs", "3"])
-        .unwrap();
+    let cli = Cli::try_parse_from(["refray", "webhook", "uninstall", "--dry-run"]).unwrap();
 
     let Command::Webhook(WebhookCommand::Uninstall(args)) = cli.command else {
         panic!("parsed unexpected command");
     };
+    assert_eq!(args.url, None);
     assert!(args.dry_run);
-    assert_eq!(args.jobs, 3);
+}
+
+#[test]
+fn cli_accepts_webhook_uninstall_url() {
+    let cli = Cli::try_parse_from([
+        "refray",
+        "webhook",
+        "uninstall",
+        "https://old.example.test/webhook",
+    ])
+    .unwrap();
+
+    let Command::Webhook(WebhookCommand::Uninstall(args)) = cli.command else {
+        panic!("parsed unexpected command");
+    };
+    assert_eq!(
+        args.url,
+        Some("https://old.example.test/webhook".to_string())
+    );
 }
 
 #[test]
 fn cli_rejects_removed_webhook_uninstall_args() {
     for args in [
-        ["refray", "webhook", "uninstall", "repo-one"].as_slice(),
         [
             "refray",
             "webhook",
@@ -161,14 +185,45 @@ fn cli_rejects_removed_webhook_uninstall_args() {
 }
 
 #[test]
+fn cli_rejects_invalid_webhook_uninstall_url() {
+    for args in [
+        ["refray", "webhook", "uninstall", "repo-one"].as_slice(),
+        [
+            "refray",
+            "webhook",
+            "uninstall",
+            "ftp://example.test/webhook",
+        ]
+        .as_slice(),
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn webhook_uninstall_url_uses_arg_before_config() {
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        webhook: None,
+        ..Config::default()
+    };
+
+    let url = resolve_uninstall_webhook_url(
+        &config,
+        Some("https://old.example.test/webhook".to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(url, "https://old.example.test/webhook");
+}
+
+#[test]
 fn cli_accepts_webhook_update() {
     let cli = Cli::try_parse_from([
         "refray",
         "webhook",
         "update",
         "https://new.example.test/webhook",
-        "--jobs",
-        "5",
     ])
     .unwrap();
 
@@ -176,7 +231,6 @@ fn cli_accepts_webhook_update() {
         panic!("parsed unexpected command");
     };
     assert_eq!(args.url, "https://new.example.test/webhook");
-    assert_eq!(args.jobs, 5);
 }
 
 #[test]
