@@ -18,6 +18,7 @@ use url::Url;
 type HmacSha256 = Hmac<Sha256>;
 
 const REPO_PREFIX: &str = "refray-e2e-";
+const CONFLICT_BRANCH_ROOT: &str = "refray/conflicts/";
 const MAIN_BRANCH: &str = "main";
 const WEBHOOK_SECRET: &str = "refray-e2e-secret";
 
@@ -523,6 +524,7 @@ namespace = "{}"
         )?;
         self.sync([])?;
         self.assert_conflict_branch_exists(&repo)?;
+        self.assert_conflict_pull_request_exists(&repo)?;
         self.write_config(ConflictMode::AutoRebasePullRequest, None, true)?;
         Ok(())
     }
@@ -559,6 +561,7 @@ namespace = "{}"
         )?;
         self.sync([])?;
         self.assert_conflict_branch_exists(&repo)?;
+        self.assert_conflict_pull_request_exists(&repo)?;
         self.write_config(ConflictMode::AutoRebasePullRequest, None, true)?;
         Ok(())
     }
@@ -987,12 +990,27 @@ namespace = "{}"
                 if refs
                     .branches
                     .keys()
-                    .any(|branch| branch.starts_with("refray/conflicts/"))
+                    .any(|branch| branch.starts_with(CONFLICT_BRANCH_ROOT))
                 {
                     return Ok(());
                 }
             }
             bail!("no refray/conflicts branch found for {repo}")
+        })
+    }
+
+    fn assert_conflict_pull_request_exists(&self, repo: &str) -> Result<()> {
+        retry("conflict pull request", || {
+            for provider in &self.settings.providers {
+                let pulls = provider.list_open_pull_requests(repo, MAIN_BRANCH)?;
+                if pulls.iter().any(|pull| {
+                    pull.head_branch.starts_with(CONFLICT_BRANCH_ROOT)
+                        && pull.base_branch.as_deref() == Some(MAIN_BRANCH)
+                }) {
+                    return Ok(());
+                }
+            }
+            bail!("no open refray conflict pull request found for {repo}")
         })
     }
 
@@ -1387,7 +1405,49 @@ impl ProviderAccount {
         GitRefs::from_output(&output.stdout)
     }
 
+    fn list_open_pull_requests(
+        &self,
+        repo: &str,
+        base_branch: &str,
+    ) -> Result<Vec<ProviderPullRequest>> {
+        let url = match self.kind {
+            ProviderKind::Github => format!(
+                "{}/repos/{}/{}/pulls?state=open&base={}&per_page=100",
+                self.api_base(),
+                self.username,
+                repo,
+                urlencoding(base_branch)
+            ),
+            ProviderKind::Gitlab => format!(
+                "{}/projects/{}/merge_requests?state=opened&target_branch={}&per_page=100",
+                self.api_base(),
+                urlencoding(&format!("{}/{}", self.username, repo)),
+                urlencoding(base_branch)
+            ),
+            ProviderKind::Gitea | ProviderKind::Forgejo => format!(
+                "{}/repos/{}/{}/pulls?state=open&base={}&limit=50",
+                self.api_base(),
+                self.username,
+                repo,
+                urlencoding(base_branch)
+            ),
+        };
+        Ok(self
+            .paged_get_values(&url)?
+            .into_iter()
+            .map(|value| ProviderPullRequest::from_json(self.kind, &value))
+            .collect())
+    }
+
     fn paged_get(&self, first_url: &str) -> Result<Vec<ProviderRepo>> {
+        Ok(self
+            .paged_get_values(first_url)?
+            .into_iter()
+            .map(|value| ProviderRepo::from_json(self.kind, &value))
+            .collect())
+    }
+
+    fn paged_get_values(&self, first_url: &str) -> Result<Vec<Value>> {
         let mut url = first_url.to_string();
         let mut output = Vec::new();
         loop {
@@ -1397,12 +1457,8 @@ impl ProviderAccount {
             let value: Value = response.json()?;
             let items = value
                 .as_array()
-                .ok_or_else(|| anyhow!("{} did not return a repository array", self.site_name))?;
-            output.extend(
-                items
-                    .iter()
-                    .map(|value| ProviderRepo::from_json(self.kind, value)),
-            );
+                .ok_or_else(|| anyhow!("{} did not return an array", self.site_name))?;
+            output.extend(items.iter().cloned());
             let Some(next) = next_link(&headers) else {
                 break;
             };
@@ -1515,6 +1571,41 @@ impl ProviderRepo {
                 .map(ToOwned::to_owned),
         };
         Self { name, owner_login }
+    }
+}
+
+struct ProviderPullRequest {
+    head_branch: String,
+    base_branch: Option<String>,
+}
+
+impl ProviderPullRequest {
+    fn from_json(kind: ProviderKind, value: &Value) -> Self {
+        let head_branch = match kind {
+            ProviderKind::Github | ProviderKind::Gitea | ProviderKind::Forgejo => value
+                .pointer("/head/ref")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            ProviderKind::Gitlab => value
+                .get("source_branch")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        }
+        .to_string();
+        let base_branch = match kind {
+            ProviderKind::Github | ProviderKind::Gitea | ProviderKind::Forgejo => value
+                .pointer("/base/ref")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            ProviderKind::Gitlab => value
+                .get("target_branch")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        };
+        Self {
+            head_branch,
+            base_branch,
+        }
     }
 }
 
