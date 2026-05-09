@@ -66,8 +66,6 @@ pub struct MirrorConfig {
     #[serde(default)]
     pub visibility: Visibility,
     #[serde(default)]
-    pub allow_force: bool,
-    #[serde(default)]
     pub conflict_resolution: ConflictResolutionStrategy,
 }
 

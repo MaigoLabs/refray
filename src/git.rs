@@ -166,7 +166,6 @@ impl GitMirror {
     pub fn branch_decisions(
         &self,
         remotes: &[RemoteSpec],
-        allow_force: bool,
     ) -> Result<(Vec<BranchDecision>, Vec<BranchConflict>)> {
         let mut by_branch: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for remote in remotes {
@@ -206,20 +205,6 @@ impl GitMirror {
             }
 
             if let Some(winner) = self.fast_forward_winner(unique.iter())? {
-                let source_remotes = tips
-                    .iter()
-                    .filter_map(|(remote, sha)| (sha == &winner).then_some(remote))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let target_remotes = missing_remotes(&all_remote_names, &source_remotes);
-                decisions.push(BranchDecision {
-                    branch,
-                    sha: winner,
-                    source_remotes,
-                    target_remotes,
-                });
-            } else if allow_force {
-                let winner = self.newest_commit(unique.iter())?;
                 let source_remotes = tips
                     .iter()
                     .filter_map(|(remote, sha)| (sha == &winner).then_some(remote))
@@ -286,22 +271,13 @@ impl GitMirror {
         Ok((decisions, conflicts))
     }
 
-    pub fn push_branches(
-        &self,
-        remotes: &[RemoteSpec],
-        branches: &[BranchDecision],
-        force: bool,
-    ) -> Result<()> {
+    pub fn push_branches(&self, remotes: &[RemoteSpec], branches: &[BranchDecision]) -> Result<()> {
         for remote in remotes {
             for branch in branches {
                 if !branch.target_remotes.contains(&remote.name) {
                     continue;
                 }
-                let refspec = if force {
-                    format!("+{}:refs/heads/{}", branch.sha, branch.branch)
-                } else {
-                    format!("{}:refs/heads/{}", branch.sha, branch.branch)
-                };
+                let refspec = format!("{}:refs/heads/{}", branch.sha, branch.branch);
                 crate::logln!(
                     "  {} {} {} {}",
                     style("push").green().bold(),
@@ -531,23 +507,6 @@ impl GitMirror {
             }
         }
         Ok(None)
-    }
-
-    fn newest_commit<'a>(&self, shas: impl Iterator<Item = &'a String>) -> Result<String> {
-        let mut newest: Option<(i64, String)> = None;
-        for sha in shas {
-            let timestamp = self
-                .output(["show", "-s", "--format=%ct", sha])?
-                .trim()
-                .parse::<i64>()?;
-            match &newest {
-                Some((old, _)) if *old >= timestamp => {}
-                _ => newest = Some((timestamp, sha.clone())),
-            }
-        }
-        newest
-            .map(|(_, sha)| sha)
-            .context("no commits found while choosing force winner")
     }
 
     fn merge_base(&self, left: &str, right: &str) -> Result<String> {

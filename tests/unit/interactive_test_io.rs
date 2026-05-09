@@ -74,7 +74,6 @@ where
         repo_blacklist: repo_filters.blacklist,
         create_missing: true,
         visibility: Visibility::Private,
-        allow_force: false,
         conflict_resolution,
     });
     prompt_webhook_setup(reader, writer, config)?;
