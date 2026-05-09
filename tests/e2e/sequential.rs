@@ -613,11 +613,18 @@ namespace = "{}"
     fn webhook_commands_and_receiver_work(&self) -> Result<()> {
         let repo = self.repo_name("webhook");
         let source = self.primary_provider();
+        let webhook_url = format!("https://example.com/refray-e2e/{}/{repo}", self.run_id);
+        let webhook_url_with_slash = format!("{webhook_url}/");
         self.seed_all_main(&repo, "webhook base", 1_700_001_601)?;
         self.sync_repo(&repo, [])?;
+        self.set_webhook_url(&webhook_url)?;
 
         self.refray(["webhook", "install", "--dry-run"])?;
         self.refray(["webhook", "uninstall", "--dry-run"])?;
+        self.refray(["webhook", "install"])?;
+        self.assert_webhook_exists_all(&repo, &webhook_url)?;
+        self.refray(["webhook", "uninstall", &webhook_url_with_slash])?;
+        self.assert_webhook_absent_all(&repo, &webhook_url)?;
         self.refray([
             "webhook",
             "update",
@@ -778,6 +785,41 @@ namespace = "{}"
         }
         if !replaced {
             bail!("config is missing repo_whitelist");
+        }
+        fs::write(&self.config_path, updated)
+            .with_context(|| format!("failed to write {}", self.config_path.display()))
+    }
+
+    fn set_webhook_url(&self, url: &str) -> Result<()> {
+        let contents = fs::read_to_string(&self.config_path)
+            .with_context(|| format!("failed to read {}", self.config_path.display()))?;
+        let escaped_url = url.replace('"', "\\\"");
+        let mut in_webhook = false;
+        let mut replaced = false;
+        let mut updated = contents
+            .lines()
+            .map(|line| {
+                if line.trim() == "[webhook]" {
+                    in_webhook = true;
+                    return line.to_string();
+                }
+                if line.starts_with('[') {
+                    in_webhook = false;
+                }
+                if in_webhook && line.starts_with("url = ") {
+                    replaced = true;
+                    format!("url = \"{escaped_url}\"")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if contents.ends_with('\n') {
+            updated.push('\n');
+        }
+        if !replaced {
+            bail!("config is missing [webhook].url");
         }
         fs::write(&self.config_path, updated)
             .with_context(|| format!("failed to write {}", self.config_path.display()))
@@ -1014,6 +1056,42 @@ namespace = "{}"
         })
     }
 
+    fn assert_webhook_exists_all(&self, repo: &str, url: &str) -> Result<()> {
+        retry("webhook installed", || {
+            for provider in &self.settings.providers {
+                let urls = provider.list_webhook_urls(repo)?;
+                if !urls
+                    .iter()
+                    .any(|candidate| webhook_urls_match(candidate, url))
+                {
+                    bail!(
+                        "webhook {url} missing on {} for {repo}; found {urls:?}",
+                        provider.site_name
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn assert_webhook_absent_all(&self, repo: &str, url: &str) -> Result<()> {
+        retry("webhook uninstalled", || {
+            for provider in &self.settings.providers {
+                let urls = provider.list_webhook_urls(repo)?;
+                if urls
+                    .iter()
+                    .any(|candidate| webhook_urls_match(candidate, url))
+                {
+                    bail!(
+                        "webhook {url} still exists on {} for {repo}",
+                        provider.site_name
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn refs_by_provider(&self, repo: &str) -> Result<BTreeMap<String, GitRefs>> {
         let mut output = BTreeMap::new();
         for provider in &self.settings.providers {
@@ -1081,17 +1159,17 @@ impl ProviderAccount {
     ) -> Self {
         let mut base_url = trim_url(&base_url).to_string();
         let mut username = username;
-        if let Ok(url) = Url::parse(&username) {
-            if let Some(host) = url.host_str() {
-                let path = url.path().trim_matches('/');
-                if !path.is_empty() {
-                    let mut profile_base_url = format!("{}://{}", url.scheme(), host);
-                    if let Some(port) = url.port() {
-                        profile_base_url.push_str(&format!(":{port}"));
-                    }
-                    base_url = profile_base_url;
-                    username = path.to_string();
+        if let Ok(url) = Url::parse(&username)
+            && let Some(host) = url.host_str()
+        {
+            let path = url.path().trim_matches('/');
+            if !path.is_empty() {
+                let mut profile_base_url = format!("{}://{}", url.scheme(), host);
+                if let Some(port) = url.port() {
+                    profile_base_url.push_str(&format!(":{port}"));
                 }
+                base_url = profile_base_url;
+                username = path.to_string();
             }
         }
         Self {
@@ -1454,6 +1532,33 @@ impl ProviderAccount {
             .collect())
     }
 
+    fn list_webhook_urls(&self, repo: &str) -> Result<Vec<String>> {
+        let url = match self.kind {
+            ProviderKind::Github => format!(
+                "{}/repos/{}/{}/hooks?per_page=100",
+                self.api_base(),
+                self.username,
+                repo
+            ),
+            ProviderKind::Gitlab => format!(
+                "{}/projects/{}/hooks?per_page=100",
+                self.api_base(),
+                urlencoding(&format!("{}/{}", self.username, repo))
+            ),
+            ProviderKind::Gitea | ProviderKind::Forgejo => format!(
+                "{}/repos/{}/{}/hooks?limit=50",
+                self.api_base(),
+                self.username,
+                repo
+            ),
+        };
+        Ok(self
+            .paged_get_values(&url)?
+            .into_iter()
+            .filter_map(|value| webhook_url_from_json(&value))
+            .collect())
+    }
+
     fn paged_get(&self, first_url: &str) -> Result<Vec<ProviderRepo>> {
         Ok(self
             .paged_get_values(first_url)?
@@ -1806,6 +1911,42 @@ fn exact_pattern(repo: &str) -> String {
 
 fn trim_url(value: &str) -> &str {
     value.trim_end_matches('/')
+}
+
+fn webhook_url_from_json(value: &Value) -> Option<String> {
+    value
+        .pointer("/config/url")
+        .or_else(|| value.get("url"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn webhook_urls_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (normalize_webhook_url(left), normalize_webhook_url(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn normalize_webhook_url(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let port = url.port_or_known_default()?;
+    let username = url.username();
+    let password = url.password().unwrap_or_default();
+    let path = url.path().trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
+    let query = url.query().unwrap_or_default();
+    Some(format!(
+        "{scheme}://{username}:{password}@{host}:{port}{path}?{query}"
+    ))
 }
 
 fn urlencoding(value: &str) -> String {

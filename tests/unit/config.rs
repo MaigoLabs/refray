@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn parses_token_forms() {
+fn parses_value_tokens() {
     let config: Config = toml::from_str(
         r#"
         jobs = 8
@@ -9,7 +9,7 @@ fn parses_token_forms() {
         [webhook]
         install = true
         url = "https://mirror.example.test/webhook"
-        secret = { env = "WEBHOOK_SECRET" }
+        secret = { value = "webhook-secret" }
         full_sync_interval_minutes = 60
         reachability_check_interval_minutes = 15
 
@@ -17,7 +17,7 @@ fn parses_token_forms() {
         name = "github"
         provider = "github"
         base_url = "https://github.com"
-        token = { env = "GITHUB_TOKEN" }
+        token = { value = "github-token" }
 
         [[mirrors]]
         name = "personal"
@@ -62,9 +62,26 @@ fn parses_token_forms() {
     assert_eq!(webhook.url, "https://mirror.example.test/webhook");
     assert_eq!(
         webhook.secret,
-        TokenConfig::Env("WEBHOOK_SECRET".to_string())
+        TokenConfig::Value("webhook-secret".to_string())
     );
     assert_eq!(webhook.full_sync_interval_minutes, Some(60));
+}
+
+#[test]
+fn env_token_form_is_rejected() {
+    let err = toml::from_str::<Config>(
+        r#"
+        [[sites]]
+        name = "github"
+        provider = "github"
+        base_url = "https://github.com"
+        token = { env = "GITHUB_TOKEN" }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("unknown variant") || err.contains("expected"));
 }
 
 #[test]
@@ -204,6 +221,34 @@ fn validation_rejects_invalid_repo_filter_regex() {
     let err = validate_config(&config).unwrap_err().to_string();
 
     assert!(err.contains("invalid repo_whitelist regex"));
+}
+
+#[test]
+fn validation_rejects_duplicate_mirror_endpoints() {
+    let duplicate = EndpointConfig {
+        site: "github".to_string(),
+        kind: NamespaceKind::User,
+        namespace: "alice".to_string(),
+    };
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![site("github", ProviderKind::Github)],
+        mirrors: vec![MirrorConfig {
+            name: "broken".to_string(),
+            endpoints: vec![duplicate.clone(), duplicate],
+            sync_visibility: SyncVisibility::All,
+            repo_whitelist: Vec::new(),
+            repo_blacklist: Vec::new(),
+            create_missing: true,
+            visibility: Visibility::Private,
+            conflict_resolution: ConflictResolutionStrategy::Fail,
+        }],
+        webhook: None,
+    };
+
+    let err = validate_config(&config).unwrap_err().to_string();
+
+    assert!(err.contains("duplicate endpoint"));
 }
 
 #[test]

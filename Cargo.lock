@@ -1125,6 +1125,7 @@ dependencies = [
  "console",
  "dialoguer",
  "directories",
+ "getrandom 0.3.4",
  "hmac",
  "regex",
  "reqwest",

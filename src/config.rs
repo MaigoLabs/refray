@@ -1,4 +1,4 @@
-use std::env;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,7 +48,6 @@ pub enum ProviderKind {
 #[serde(rename_all = "snake_case")]
 pub enum TokenConfig {
     Value(String),
-    Env(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -217,7 +216,7 @@ impl Config {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let contents = toml::to_string_pretty(self)?;
-        let mut file = fs::File::create(path)
+        let mut file = create_private_file(path)
             .with_context(|| format!("failed to create {}", path.display()))?;
         file.write_all(contents.as_bytes())
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -295,11 +294,9 @@ impl WebhookConfig {
 }
 
 impl TokenConfig {
-    pub fn value(&self, label: &str) -> Result<String> {
+    pub fn value(&self, _label: &str) -> Result<String> {
         match self {
             TokenConfig::Value(value) => Ok(value.clone()),
-            TokenConfig::Env(name) => env::var(name)
-                .with_context(|| format!("environment variable {name} for {label} is not set")),
         }
     }
 }
@@ -324,6 +321,24 @@ pub fn default_work_dir() -> PathBuf {
 
 fn trim_end(value: &str) -> &str {
     value.trim_end_matches('/')
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> Result<fs::File> {
+    fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))
 }
 
 #[cfg(unix)]
@@ -358,7 +373,15 @@ pub fn validate_config(config: &Config) -> Result<()> {
                 mirror.name
             );
         }
+        let mut endpoints = BTreeSet::new();
         for endpoint in &mirror.endpoints {
+            if !endpoints.insert(endpoint) {
+                bail!(
+                    "mirror '{}' contains duplicate endpoint {}",
+                    mirror.name,
+                    endpoint.label()
+                );
+            }
             config.site(&endpoint.site).ok_or_else(|| {
                 anyhow!(
                     "mirror '{}' references unknown site '{}'",

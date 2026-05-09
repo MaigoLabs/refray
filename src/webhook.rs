@@ -215,7 +215,7 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
                 });
             }
         }
-        run_install_tasks(tasks, options.jobs, Arc::clone(&state), false)?;
+        run_install_tasks(tasks, options.jobs, Arc::clone(&state))?;
     }
     if !options.dry_run {
         let state = state
@@ -345,7 +345,7 @@ pub fn ensure_configured_webhooks(
             dry_run: false,
         });
     }
-    run_install_tasks(tasks, jobs, Arc::clone(&state), true)?;
+    run_install_tasks(tasks, jobs, Arc::clone(&state))?;
     let state = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -480,7 +480,6 @@ fn run_install_tasks(
     tasks: Vec<WebhookInstallTask>,
     jobs: usize,
     state: Arc<Mutex<WebhookState>>,
-    use_state_cache: bool,
 ) -> Result<()> {
     if tasks.is_empty() {
         return Ok(());
@@ -510,7 +509,7 @@ fn run_install_tasks(
                     break;
                 };
                 if result_sender
-                    .send(install_webhook_task(task, &state, use_state_cache))
+                    .send(install_webhook_task(task, &state))
                     .is_err()
                 {
                     break;
@@ -598,31 +597,8 @@ fn run_uninstall_tasks(tasks: Vec<WebhookUninstallTask>, jobs: usize) -> Result<
     Ok(removed_keys)
 }
 
-fn install_webhook_task(
-    task: WebhookInstallTask,
-    state: &Arc<Mutex<WebhookState>>,
-    use_state_cache: bool,
-) -> Result<()> {
+fn install_webhook_task(task: WebhookInstallTask, state: &Arc<Mutex<WebhookState>>) -> Result<()> {
     let key = webhook_installation_key(&task.group, &task.endpoint, &task.repo.name);
-    if use_state_cache {
-        let state = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state
-            .installations
-            .get(&key)
-            .is_some_and(|installation| installation.url == task.url)
-        {
-            return Ok(());
-        }
-        if state
-            .skipped
-            .get(&key)
-            .is_some_and(|skipped| skipped.url == task.url)
-        {
-            return Ok(());
-        }
-    }
     crate::logln!(
         "  {} {} {}",
         style(if task.dry_run {

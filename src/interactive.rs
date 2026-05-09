@@ -1,10 +1,8 @@
 use std::fmt::Display;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use console::{Term, style};
@@ -284,7 +282,7 @@ fn prompt_webhook_setup_styled(config: &mut Config, theme: &ColorfulTheme) -> Re
     config.webhook = Some(WebhookConfig {
         install: true,
         url,
-        secret: TokenConfig::Value(generate_webhook_secret()),
+        secret: TokenConfig::Value(generate_webhook_secret()?),
         full_sync_interval_minutes,
         reachability_check_interval_minutes: Some(15),
     });
@@ -1340,25 +1338,15 @@ fn validate_url(value: &str) -> std::result::Result<(), String> {
     }
 }
 
-fn generate_webhook_secret() -> String {
+fn generate_webhook_secret() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    if File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .is_err()
-    {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            *byte = ((nanos >> ((index % 16) * 8)) & 0xff) as u8;
-        }
-    }
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow!("failed to generate webhook secret: {error}"))?;
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         output.push_str(&format!("{byte:02x}"));
     }
-    output
+    Ok(output)
 }
 
 #[cfg(test)]
