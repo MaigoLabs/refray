@@ -100,6 +100,7 @@ fn parses_gitlab_push_payload() {
 #[test]
 fn matches_jobs_by_provider_and_namespace() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![
             site("github", ProviderKind::Github),
             site("gitea", ProviderKind::Gitea),
@@ -147,6 +148,7 @@ fn matching_jobs_respects_repo_name_filters() {
         conflict_resolution: ConflictResolutionStrategy::Fail,
     };
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![site("github", ProviderKind::Github)],
         mirrors: vec![mirror.clone()],
         webhook: None,
@@ -161,6 +163,7 @@ fn matching_jobs_respects_repo_name_filters() {
 
     mirror.repo_whitelist.clear();
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![site("github", ProviderKind::Github)],
         mirrors: vec![mirror],
         webhook: None,
@@ -356,6 +359,50 @@ fn uninstall_task_removes_state_even_when_hook_is_missing() {
 
     assert_eq!(key.as_deref(), Some("sync-1\tgithub\tUser\talice\trepo"));
     handle.join().unwrap();
+}
+
+#[test]
+fn uninstall_state_cleanup_only_removes_matching_url() {
+    let endpoint = endpoint("github", NamespaceKind::User, "alice");
+    let key = webhook_installation_key("sync-1", &endpoint, "repo");
+    let mut state = WebhookState::default();
+    state.installations.insert(
+        key.clone(),
+        WebhookInstallation {
+            group: "sync-1".to_string(),
+            endpoint: endpoint.clone(),
+            repo: "repo".to_string(),
+            url: "https://current.example.test/webhook".to_string(),
+        },
+    );
+    state.skipped.insert(
+        key.clone(),
+        SkippedWebhookInstallation {
+            group: "sync-1".to_string(),
+            endpoint,
+            repo: "repo".to_string(),
+            url: "https://current.example.test/webhook".to_string(),
+            reason: "provider blocked access".to_string(),
+        },
+    );
+
+    remove_webhook_state_keys(
+        &mut state,
+        vec![key.clone()],
+        "https://old.example.test/webhook",
+    );
+
+    assert!(state.installations.contains_key(&key));
+    assert!(state.skipped.contains_key(&key));
+
+    remove_webhook_state_keys(
+        &mut state,
+        vec![key.clone()],
+        "https://current.example.test/webhook",
+    );
+
+    assert!(!state.installations.contains_key(&key));
+    assert!(!state.skipped.contains_key(&key));
 }
 
 fn site(name: &str, provider: ProviderKind) -> SiteConfig {

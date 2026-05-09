@@ -4,6 +4,8 @@ use super::*;
 fn parses_token_forms() {
     let config: Config = toml::from_str(
         r#"
+        jobs = 8
+
         [webhook]
         install = true
         url = "https://mirror.example.test/webhook"
@@ -40,6 +42,7 @@ fn parses_token_forms() {
     )
     .unwrap();
 
+    assert_eq!(config.jobs, 8);
     assert_eq!(config.sites.len(), 1);
     assert_eq!(config.mirrors[0].endpoints.len(), 2);
     assert_eq!(
@@ -66,8 +69,16 @@ fn parses_token_forms() {
 }
 
 #[test]
+fn config_defaults_jobs() {
+    let config: Config = toml::from_str("").unwrap();
+
+    assert_eq!(config.jobs, DEFAULT_JOBS);
+}
+
+#[test]
 fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![site("github", ProviderKind::Github)],
         mirrors: vec![MirrorConfig {
             name: "broken".to_string(),
@@ -90,6 +101,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
     assert!(err.contains("at least two endpoints"));
 
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![site("github", ProviderKind::Github)],
         mirrors: vec![MirrorConfig {
             name: "broken".to_string(),
@@ -185,6 +197,7 @@ fn repo_name_filter_applies_whitelist_then_blacklist() {
 #[test]
 fn validation_rejects_invalid_repo_filter_regex() {
     let mut config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![site("github", ProviderKind::Github)],
         mirrors: vec![mirror_config()],
         webhook: None,
@@ -194,6 +207,22 @@ fn validation_rejects_invalid_repo_filter_regex() {
     let err = validate_config(&config).unwrap_err().to_string();
 
     assert!(err.contains("invalid repo_whitelist regex"));
+}
+
+#[test]
+fn validation_rejects_zero_jobs() {
+    let mut config = Config {
+        jobs: 0,
+        sites: vec![site("github", ProviderKind::Github)],
+        mirrors: vec![mirror_config()],
+        webhook: None,
+    };
+
+    let err = validate_config(&config).unwrap_err().to_string();
+
+    assert!(err.contains("jobs must be at least 1"));
+    config.jobs = DEFAULT_JOBS;
+    validate_config(&config).unwrap();
 }
 
 fn mirror_config() -> MirrorConfig {

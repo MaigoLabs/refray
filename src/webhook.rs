@@ -77,7 +77,7 @@ struct JobQueue {
 pub fn serve(config: Config, options: ServeOptions) -> Result<()> {
     validate_config(&config)?;
     if options.workers == 0 {
-        bail!("--jobs must be at least 1");
+        bail!("jobs must be at least 1");
     }
     let server = Server::http(&options.listen)
         .map_err(|error| anyhow::anyhow!("failed to listen on {}: {error}", options.listen))?;
@@ -174,7 +174,7 @@ fn reachability_timer_loop(url: String, minutes: u64) {
 pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Result<()> {
     validate_config(config)?;
     if options.jobs == 0 {
-        bail!("--jobs must be at least 1");
+        bail!("jobs must be at least 1");
     }
     let work_dir = options.work_dir.clone().unwrap_or_else(default_work_dir);
     let state = Arc::new(Mutex::new(load_webhook_state(&work_dir)?));
@@ -229,7 +229,7 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
 pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> Result<()> {
     validate_config(config)?;
     if options.jobs == 0 {
-        bail!("--jobs must be at least 1");
+        bail!("jobs must be at least 1");
     }
     let work_dir = options.work_dir.clone().unwrap_or_else(default_work_dir);
     let mut state = load_webhook_state(&work_dir)?;
@@ -267,10 +267,7 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
     let removed_keys = run_uninstall_tasks(tasks, options.jobs)?;
 
     if !options.dry_run {
-        for key in removed_keys {
-            state.installations.remove(&key);
-            state.skipped.remove(&key);
-        }
+        remove_webhook_state_keys(&mut state, removed_keys, &options.url);
         save_webhook_state(&work_dir, &state)?;
     }
     Ok(())
@@ -279,7 +276,7 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
 pub fn update_webhooks(config: &Config, options: WebhookUpdateOptions) -> Result<()> {
     validate_config(config)?;
     if options.jobs == 0 {
-        bail!("--jobs must be at least 1");
+        bail!("jobs must be at least 1");
     }
     if options.old_url != options.new_url {
         crate::logln!(
@@ -325,7 +322,7 @@ pub fn ensure_configured_webhooks(
         return Ok(());
     }
     if jobs == 0 {
-        bail!("--jobs must be at least 1");
+        bail!("jobs must be at least 1");
     }
     let secret = webhook.secret()?;
     let state = Arc::new(Mutex::new(load_webhook_state(work_dir)?));
@@ -694,6 +691,25 @@ fn record_webhook_installation(
             url: task.url,
         },
     );
+}
+
+fn remove_webhook_state_keys(state: &mut WebhookState, keys: Vec<String>, url: &str) {
+    for key in keys {
+        if state
+            .installations
+            .get(&key)
+            .is_some_and(|installation| installation.url == url)
+        {
+            state.installations.remove(&key);
+        }
+        if state
+            .skipped
+            .get(&key)
+            .is_some_and(|skipped| skipped.url == url)
+        {
+            state.skipped.remove(&key);
+        }
+    }
 }
 
 fn uninstall_webhook_task(task: WebhookUninstallTask) -> Result<Option<String>> {

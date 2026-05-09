@@ -139,6 +139,7 @@ fn wizard_can_enable_webhooks() {
 #[test]
 fn wizard_reuses_existing_credentials_for_same_instance() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![SiteConfig {
             name: "github".to_string(),
             provider: ProviderKind::Github,
@@ -177,6 +178,7 @@ fn wizard_reuses_existing_credentials_for_same_instance() {
 #[test]
 fn wizard_starts_existing_config_at_sync_group_menu() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![
             SiteConfig {
                 name: "github".to_string(),
@@ -234,6 +236,7 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
 #[test]
 fn wizard_can_ask_to_run_full_sync_after_config() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: Vec::new(),
         mirrors: vec![MirrorConfig {
             name: "sync-1".to_string(),
@@ -274,6 +277,7 @@ fn wizard_skips_full_sync_prompt_without_sync_groups() {
 #[test]
 fn wizard_edits_existing_sync_group_from_menu() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![
             SiteConfig {
                 name: "github".to_string(),
@@ -371,6 +375,7 @@ fn wizard_edits_existing_sync_group_from_menu() {
 #[test]
 fn wizard_prefills_existing_sync_group_when_editing() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![
             SiteConfig {
                 name: "github".to_string(),
@@ -435,6 +440,7 @@ fn wizard_prefills_existing_sync_group_when_editing() {
 #[test]
 fn wizard_deletes_existing_sync_group_from_menu() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![
             SiteConfig {
                 name: "github".to_string(),
@@ -494,6 +500,7 @@ fn wizard_deletes_existing_sync_group_from_menu() {
 #[test]
 fn wizard_can_go_back_from_delete_menu() {
     let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
         sites: vec![
             SiteConfig {
                 name: "github".to_string(),

@@ -52,6 +52,8 @@ refray config
 <details><summary>Example Config</summary>
 
 ```toml
+jobs = 8
+
 [[sites]]
 name = "github"
 provider = "github"
@@ -123,10 +125,10 @@ Retry only repositories that failed during the previous non-dry-run sync:
 refray sync --retry-failed
 ```
 
-Control repo-level parallelism:
+Control parallelism for sync, serve, and webhook commands in config:
 
-```sh
-refray sync --jobs 8
+```toml
+jobs = 8
 ```
 
 </details>
@@ -139,18 +141,17 @@ You can run `refray` as a service that listens for webhook events and runs full 
 > If you want to use webhooks, you need to expose port 8787 to a public URL that can be accessed by the git provider.<br>
 > This can be done using e.g. port forwarding, reverse proxy, cloudflare tunnel, or tailscale funnel.
 
-Start the service:
+Start the service (to sync on push and also do full sync periodically):
 
 ```sh
 refray serve
 ```
 
-Install webhooks on all repos:
+Install webhooks on all repos (with the URL in config):
 
 ```sh
 refray webhook install
 ```
-Webhook install uses `[webhook].url` and `[webhook].secret` from your config.
 
 To uninstall webhooks previously installed by `refray`:
 
@@ -161,19 +162,17 @@ To uninstall webhooks previously installed by `refray`:
 refray webhook uninstall
 ```
 
+By default, uninstall uses `[webhook].url` from your config. To remove hooks for a previous URL, pass it explicitly:
+
+```sh
+refray webhook uninstall https://old.example.com/webhook
+```
+
 To move installed hooks to a new public URL, use `webhook update`. It removes hooks matching the current configured `[webhook].url`, installs the new URL, updates `[webhook].url` in the config, and refreshes local webhook state:
 
 ```sh
 refray webhook update https://new.example.com/webhook
 ```
-
-Serve can also run periodic full syncs. The interval can be configured in `[webhook].full_sync_interval_minutes` or overridden at startup:
-
-```sh
-refray serve --full-sync-interval-minutes 30
-```
-
-If `[webhook].reachability_check_interval_minutes` is configured, `serve` periodically checks that the public webhook URL is still reachable and logs a warning when it is not.
 
 ## Sync Semantics
 
