@@ -544,16 +544,21 @@ impl<'a> ProviderClient<'a> {
     fn gitea_list_repos(&self, endpoint: &EndpointConfig) -> Result<Vec<RemoteRepo>> {
         match endpoint.kind {
             NamespaceKind::User => {
-                let url = format!("{}/user/repos?limit=50", self.site.api_base());
-                owned_repos!(self, GiteaRepo, &url, &endpoint.namespace)
+                let url = format!("{}/user/repos", self.site.api_base());
+                Ok(self
+                    .gitea_paged_get::<GiteaRepo>(&url)?
+                    .into_iter()
+                    .filter(|repo| repo.owner.login.eq_ignore_ascii_case(&endpoint.namespace))
+                    .map(Into::into)
+                    .collect())
             }
             NamespaceKind::Org => {
-                let url = format!(
-                    "{}/orgs/{}/repos?limit=50",
-                    self.site.api_base(),
-                    endpoint.namespace
-                );
-                self.paged_remote_repos::<GiteaRepo>(&url)
+                let url = format!("{}/orgs/{}/repos", self.site.api_base(), endpoint.namespace);
+                Ok(self
+                    .gitea_paged_get::<GiteaRepo>(&url)?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect())
             }
             NamespaceKind::Group => bail!("Gitea/Forgejo endpoints use kind 'user' or 'org'"),
         }
@@ -579,7 +584,14 @@ impl<'a> ProviderClient<'a> {
             "description": description.unwrap_or(""),
             "auto_init": false,
         });
-        self.post_json::<GiteaRepo>(&url, &body).map(Into::into)
+        match self.post_json::<GiteaRepo>(&url, &body) {
+            Ok(repo) => Ok(repo.into()),
+            Err(error) if is_conflict_error(&error) => {
+                let repo_url = self.repo_url(endpoint, name, "Gitea/Forgejo")?;
+                self.get_json::<GiteaRepo>(&repo_url).map(Into::into)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn gitea_detect_namespace_kind(&self, namespace: &str) -> Result<Option<NamespaceKind>> {
@@ -840,6 +852,28 @@ impl<'a> ProviderClient<'a> {
             .collect())
     }
 
+    fn gitea_paged_get<T>(&self, base_url: &str) -> Result<Vec<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        const LIMIT: usize = 50;
+        let mut output = Vec::new();
+        for page in 1.. {
+            let separator = if base_url.contains('?') { '&' } else { '?' };
+            let url = format!("{base_url}{separator}page={page}&limit={LIMIT}");
+            let mut items: Vec<T> = self
+                .get(&url)?
+                .json()
+                .with_context(|| format!("invalid JSON from {url}"))?;
+            let count = items.len();
+            output.append(&mut items);
+            if count < LIMIT {
+                break;
+            }
+        }
+        Ok(output)
+    }
+
     fn get_json<T>(&self, url: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -941,6 +975,10 @@ fn check_response(method: &str, url: &str, response: Response) -> Result<Respons
 
 fn is_not_found_error(error: &anyhow::Error) -> bool {
     error.to_string().contains("404 Not Found")
+}
+
+fn is_conflict_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("409 Conflict")
 }
 
 fn next_link(headers: &HeaderMap) -> Option<String> {

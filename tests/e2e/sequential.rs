@@ -1079,10 +1079,25 @@ impl ProviderAccount {
         username: String,
         token: String,
     ) -> Self {
+        let mut base_url = trim_url(&base_url).to_string();
+        let mut username = username;
+        if let Ok(url) = Url::parse(&username) {
+            if let Some(host) = url.host_str() {
+                let path = url.path().trim_matches('/');
+                if !path.is_empty() {
+                    let mut profile_base_url = format!("{}://{}", url.scheme(), host);
+                    if let Some(port) = url.port() {
+                        profile_base_url.push_str(&format!(":{port}"));
+                    }
+                    base_url = profile_base_url;
+                    username = path.to_string();
+                }
+            }
+        }
         Self {
             site_name: site_name.into(),
             kind,
-            base_url: trim_url(&base_url).to_string(),
+            base_url,
             username,
             token,
             http: Client::builder()
@@ -1501,6 +1516,21 @@ impl ProviderAccount {
         }
         request.headers(headers)
     }
+}
+
+#[test]
+fn provider_account_derives_base_url_from_profile_url_username() {
+    let account = ProviderAccount::new(
+        "gitea",
+        ProviderKind::Gitea,
+        "https://gitea.com".to_string(),
+        "https://gitea.aza.moe/refray-test".to_string(),
+        "secret".to_string(),
+    );
+
+    assert_eq!(account.base_url, "https://gitea.aza.moe");
+    assert_eq!(account.username, "refray-test");
+    assert_eq!(account.api_base(), "https://gitea.aza.moe/api/v1");
 }
 
 #[derive(Clone, Copy)]

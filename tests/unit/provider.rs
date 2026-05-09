@@ -355,6 +355,109 @@ fn delete_repo_deletes_gitea_repo() {
 }
 
 #[test]
+fn list_gitea_repos_uses_page_and_limit_pagination() {
+    let mut first_page = Vec::new();
+    for index in 0..50 {
+        first_page.push(format!(
+            r#"{{"name":"repo-{index}","clone_url":"https://gitea.example.test/alice/repo-{index}.git","private":false,"description":null,"owner":{{"login":"alice"}}}}"#
+        ));
+    }
+    let first_page = format!("[{}]", first_page.join(","));
+    let second_page = r#"[
+        {"name":"repo-50","clone_url":"https://gitea.example.test/alice/repo-50.git","private":false,"description":null,"owner":{"login":"Alice"}},
+        {"name":"other-owner","clone_url":"https://gitea.example.test/bob/other-owner.git","private":false,"description":null,"owner":{"login":"bob"}}
+    ]"#
+    .to_string();
+    let (api_url, handle) = request_server_owned(
+        vec![("200 OK", first_page), ("200 OK", second_page)],
+        |index, request| match index {
+            0 => assert!(
+                request.starts_with("GET /user/repos?page=1&limit=50 "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request.starts_with("GET /user/repos?page=2&limit=50 "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitea, None)
+    };
+
+    let repos = ProviderClient::new(&site)
+        .unwrap()
+        .list_repos(&EndpointConfig {
+            site: "gitea".to_string(),
+            kind: NamespaceKind::User,
+            namespace: "alice".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(repos.len(), 51);
+    assert!(repos.iter().any(|repo| repo.name == "repo-50"));
+    assert!(!repos.iter().any(|repo| repo.name == "other-owner"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn create_gitea_repo_returns_existing_repo_on_conflict() {
+    let (api_url, handle) = request_server(
+        vec![
+            (
+                "409 Conflict",
+                r#"{"message":"The repository with the same name already exists."}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"name":"repo","clone_url":"https://gitea.example.test/alice/repo.git","private":false,"description":"existing","owner":{"login":"alice"}}"#,
+            ),
+        ],
+        |index, request| match index {
+            0 => {
+                assert!(
+                    request.starts_with("POST /user/repos "),
+                    "request was {request}"
+                );
+                assert!(
+                    request.contains(r#""name":"repo""#),
+                    "request was {request}"
+                );
+            }
+            1 => assert!(
+                request.starts_with("GET /repos/alice/repo "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitea, None)
+    };
+
+    let repo = ProviderClient::new(&site)
+        .unwrap()
+        .create_repo(
+            &EndpointConfig {
+                site: "gitea".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            &Visibility::Public,
+            Some("description"),
+        )
+        .unwrap();
+
+    assert_eq!(repo.name, "repo");
+    assert_eq!(repo.clone_url, "https://gitea.example.test/alice/repo.git");
+    handle.join().unwrap();
+}
+
+#[test]
 fn open_pull_request_posts_github_pull_when_missing() {
     let (api_url, handle) = request_server(
         vec![
@@ -508,6 +611,22 @@ where
 
 fn request_server<F>(
     responses: Vec<(&'static str, &'static str)>,
+    assert_request: F,
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnMut(usize, &str) + Send + 'static,
+{
+    request_server_owned(
+        responses
+            .into_iter()
+            .map(|(status, body)| (status, body.to_string()))
+            .collect(),
+        assert_request,
+    )
+}
+
+fn request_server_owned<F>(
+    responses: Vec<(&'static str, String)>,
     mut assert_request: F,
 ) -> (String, thread::JoinHandle<()>)
 where
