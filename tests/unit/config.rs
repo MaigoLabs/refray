@@ -88,6 +88,7 @@ fn env_token_form_is_rejected() {
 fn config_defaults_jobs() {
     let config: Config = toml::from_str("").unwrap();
 
+    assert_eq!(DEFAULT_JOBS, 10);
     assert_eq!(config.jobs, DEFAULT_JOBS);
 }
 
