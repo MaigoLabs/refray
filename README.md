@@ -23,7 +23,7 @@ Supported platforms: GitHub, GitLab, Gitea, Forgejo
 
 ![demo](./docs/demo.webp)
 
-<details><summary>Demo generation</summary>
+<!--
 
 The demo was rendered from an asciinema cast with capped idle pauses, Sarasa Mono SC, a One Half Dark palette with lighter dark-gray ANSI slots, and a larger font:
 
@@ -46,12 +46,12 @@ ffmpeg -i demo.gif \
   docs/demo.webp
 ```
 
-</details>
+--->
 
 
 ## Install
 
-### Option 1. Install from source
+### Option 1. Install with Cargo
 
 1. Install rust cargo if you don't have it: https://rustup.rs
 2. `cargo install refray`
