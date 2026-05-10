@@ -40,6 +40,12 @@ pub struct PullRequestInfo {
     pub url: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebhookInstallOutcome {
+    Created,
+    Existing,
+}
+
 pub fn list_mirror_repos(
     config: &Config,
     mirror: &MirrorConfig,
@@ -172,7 +178,7 @@ impl<'a> ProviderClient<'a> {
         repo: &RemoteRepo,
         url: &str,
         secret: &str,
-    ) -> Result<()> {
+    ) -> Result<WebhookInstallOutcome> {
         dispatch_provider!(self.site.provider,
             github => self.github_install_webhook(endpoint, repo, url, secret),
             gitlab => self.gitlab_install_webhook(endpoint, repo, url, secret),
@@ -317,7 +323,7 @@ impl<'a> ProviderClient<'a> {
         repo: &RemoteRepo,
         url: &str,
         secret: &str,
-    ) -> Result<()> {
+    ) -> Result<WebhookInstallOutcome> {
         let hooks_url = self.repo_hooks_url(endpoint, &repo.name, "GitHub")?;
         let body = json!({
             "name": "web",
@@ -526,7 +532,7 @@ impl<'a> ProviderClient<'a> {
         repo: &RemoteRepo,
         url: &str,
         secret: &str,
-    ) -> Result<()> {
+    ) -> Result<WebhookInstallOutcome> {
         let hooks_url = self.gitlab_hooks_url(endpoint, &repo.name);
         let body = json!({
             "url": url,
@@ -695,7 +701,7 @@ impl<'a> ProviderClient<'a> {
         repo: &RemoteRepo,
         url: &str,
         secret: &str,
-    ) -> Result<()> {
+    ) -> Result<WebhookInstallOutcome> {
         let hooks_url = self.repo_hooks_url(endpoint, &repo.name, "Gitea/Forgejo")?;
         let body = json!({
             "type": "gitea",
@@ -875,10 +881,10 @@ impl<'a> ProviderClient<'a> {
         target_url: &str,
         body: &serde_json::Value,
         put_on_update: bool,
-    ) -> Result<()> {
+    ) -> Result<WebhookInstallOutcome> {
         let Some(hook) = self.find_existing_hook(hooks_url, target_url)? else {
             self.post_json::<serde_json::Value>(hooks_url, body)?;
-            return Ok(());
+            return Ok(WebhookInstallOutcome::Created);
         };
 
         let update_url = format!("{hooks_url}/{}", hook.id);
@@ -887,7 +893,7 @@ impl<'a> ProviderClient<'a> {
         } else {
             self.patch_json::<serde_json::Value>(&update_url, body)?;
         }
-        Ok(())
+        Ok(WebhookInstallOutcome::Existing)
     }
 
     fn delete_matching_hook(&self, hooks_url: &str, target_url: &str) -> Result<bool> {

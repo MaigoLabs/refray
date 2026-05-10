@@ -18,7 +18,9 @@ use crate::config::{
     Config, EndpointConfig, MirrorConfig, ProviderKind, RepoNameFilter, default_work_dir,
     validate_config,
 };
-use crate::provider::{EndpointRepo, ProviderClient, RemoteRepo, list_mirror_repos};
+use crate::provider::{
+    EndpointRepo, ProviderClient, RemoteRepo, WebhookInstallOutcome, list_mirror_repos,
+};
 use crate::state::{load_toml_or_default, save_toml};
 use crate::sync::{SyncOptions, sync_all};
 
@@ -575,66 +577,73 @@ fn run_uninstall_tasks(tasks: Vec<WebhookUninstallTask>, jobs: usize) -> Result<
 
 fn install_webhook_task(task: WebhookInstallTask, state: &Arc<Mutex<WebhookState>>) -> Result<()> {
     let key = webhook_installation_key(&task.group, &task.endpoint, &task.repo.name);
-    crate::logln!(
-        "  {} {} {}",
-        style(if task.dry_run {
-            "would install"
-        } else {
-            "install"
-        })
-        .green()
-        .bold(),
-        style(&task.repo.name).cyan(),
-        style(format!("webhook on {}", task.endpoint.label())).dim()
-    );
     if task.dry_run {
+        crate::logln!(
+            "  {} {} {}",
+            style("would install").green().bold(),
+            style(&task.repo.name).cyan(),
+            style(format!("webhook on {}", task.endpoint.label())).dim()
+        );
         return Ok(());
     }
     let client = ProviderClient::new(&task.site)?;
-    if let Err(error) = client.install_webhook(&task.endpoint, &task.repo, &task.url, &task.secret)
-    {
-        if is_duplicate_webhook_error(&error) {
+    match client.install_webhook(&task.endpoint, &task.repo, &task.url, &task.secret) {
+        Ok(outcome) => {
+            let action = match outcome {
+                WebhookInstallOutcome::Created => "install",
+                WebhookInstallOutcome::Existing => "exists",
+            };
             crate::logln!(
                 "  {} {} {}",
-                style("exists").green().bold(),
+                style(action).green().bold(),
                 style(&task.repo.name).cyan(),
                 style(format!("webhook on {}", task.endpoint.label())).dim()
             );
             record_webhook_installation(state, key, task);
-            return Ok(());
+            Ok(())
         }
-        if let Some(reason) = non_actionable_webhook_failure_reason(&error) {
-            crate::logln!(
-                "  {} {} {}",
-                style("skip").yellow().bold(),
-                style(&task.repo.name).cyan(),
-                style(format!("webhook on {}: {reason}", task.endpoint.label())).dim()
-            );
-            let mut state = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.skipped.insert(
-                key,
-                SkippedWebhookInstallation {
-                    group: task.group,
-                    endpoint: task.endpoint,
-                    repo: task.repo.name,
-                    url: task.url,
-                    reason,
-                },
-            );
-            return Ok(());
+        Err(error) => {
+            if is_duplicate_webhook_error(&error) {
+                crate::logln!(
+                    "  {} {} {}",
+                    style("exists").green().bold(),
+                    style(&task.repo.name).cyan(),
+                    style(format!("webhook on {}", task.endpoint.label())).dim()
+                );
+                record_webhook_installation(state, key, task);
+                return Ok(());
+            }
+            if let Some(reason) = non_actionable_webhook_failure_reason(&error) {
+                crate::logln!(
+                    "  {} {} {}",
+                    style("skip").yellow().bold(),
+                    style(&task.repo.name).cyan(),
+                    style(format!("webhook on {}: {reason}", task.endpoint.label())).dim()
+                );
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.skipped.insert(
+                    key,
+                    SkippedWebhookInstallation {
+                        group: task.group,
+                        endpoint: task.endpoint,
+                        repo: task.repo.name,
+                        url: task.url,
+                        reason,
+                    },
+                );
+                return Ok(());
+            }
+            Err(error).with_context(|| {
+                format!(
+                    "failed to install webhook for {} on {}",
+                    task.repo.name,
+                    task.endpoint.label()
+                )
+            })
         }
-        return Err(error).with_context(|| {
-            format!(
-                "failed to install webhook for {} on {}",
-                task.repo.name,
-                task.endpoint.label()
-            )
-        });
     }
-    record_webhook_installation(state, key, task);
-    Ok(())
 }
 
 fn record_webhook_installation(

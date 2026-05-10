@@ -309,7 +309,7 @@ fn install_webhook_posts_github_hook_when_missing() {
     };
     let client = ProviderClient::new(&site).unwrap();
 
-    client
+    let outcome = client
         .install_webhook(
             &EndpointConfig {
                 site: "github".to_string(),
@@ -326,6 +326,63 @@ fn install_webhook_posts_github_hook_when_missing() {
             "secret",
         )
         .unwrap();
+
+    assert_eq!(outcome, WebhookInstallOutcome::Created);
+    handle.join().unwrap();
+}
+
+#[test]
+fn install_webhook_reports_existing_forgejo_hook() {
+    let (api_url, handle) = request_server(
+        vec![
+            (
+                "200 OK",
+                r#"[{"id":42,"config":{"url":"https://mirror.example.test/webhook/"}}]"#,
+            ),
+            ("200 OK", r#"{"id":42}"#),
+        ],
+        |index, request| match index {
+            0 => assert!(
+                request.starts_with("GET /repos/alice/repo/hooks "),
+                "request was {request}"
+            ),
+            1 => {
+                assert!(
+                    request.starts_with("PATCH /repos/alice/repo/hooks/42 "),
+                    "request was {request}"
+                );
+                assert!(request.contains("https://mirror.example.test/webhook"));
+                assert!(request.contains("secret"));
+                assert!(request.contains("push"));
+            }
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Forgejo, None)
+    };
+    let client = ProviderClient::new(&site).unwrap();
+
+    let outcome = client
+        .install_webhook(
+            &EndpointConfig {
+                site: "forgejo".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            &RemoteRepo {
+                name: "repo".to_string(),
+                clone_url: "https://codeberg.org/alice/repo.git".to_string(),
+                private: true,
+                description: None,
+            },
+            "https://mirror.example.test/webhook",
+            "secret",
+        )
+        .unwrap();
+
+    assert_eq!(outcome, WebhookInstallOutcome::Existing);
     handle.join().unwrap();
 }
 
