@@ -177,7 +177,7 @@ refray webhook update https://new.example.com/webhook
 
 Each mirror group is treated as a set of equivalent namespaces. Repositories are matched by repository name across all endpoints.
 
-Set `sync_visibility = "all"`, `"private"`, or `"public"` on a mirror group to choose which repository visibility is included in that group. `visibility` still controls the visibility used when `refray` creates a missing repository.
+Set `sync_visibility = "all"`, `"private"`, or `"public"` on a mirror group to choose which repository visibility is included in that group. When `refray` creates a missing repository, it mirrors the visibility of the existing repository it is syncing from; `visibility` is only a fallback when no source visibility is available.
 
 Set `repo_whitelist = ["..."]` and/or `repo_blacklist = ["..."]` on a mirror group to filter repository names with regular expressions. An empty whitelist includes all repository names, and blacklist matches are excluded after whitelist matches. These name filters are independent from `sync_visibility`; both must match for a repository to be synced.
 

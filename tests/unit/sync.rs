@@ -396,6 +396,50 @@ fn endpoint_remote_names_do_not_slug_collide() {
     );
 }
 
+#[test]
+fn created_repo_visibility_follows_existing_public_repo() {
+    let mirror = test_mirror();
+    let repo = crate::provider::RemoteRepo {
+        name: "repo".to_string(),
+        clone_url: "https://github.invalid/alice/repo.git".to_string(),
+        private: false,
+        description: None,
+    };
+
+    assert_eq!(
+        visibility_for_created_repo(&mirror, Some(&repo)),
+        crate::config::Visibility::Public
+    );
+}
+
+#[test]
+fn created_repo_visibility_follows_existing_private_repo() {
+    let mut mirror = test_mirror();
+    mirror.visibility = crate::config::Visibility::Public;
+    let repo = crate::provider::RemoteRepo {
+        name: "repo".to_string(),
+        clone_url: "https://github.invalid/alice/repo.git".to_string(),
+        private: true,
+        description: None,
+    };
+
+    assert_eq!(
+        visibility_for_created_repo(&mirror, Some(&repo)),
+        crate::config::Visibility::Private
+    );
+}
+
+#[test]
+fn created_repo_visibility_falls_back_to_config_without_template() {
+    let mut mirror = test_mirror();
+    mirror.visibility = crate::config::Visibility::Public;
+
+    assert_eq!(
+        visibility_for_created_repo(&mirror, None),
+        crate::config::Visibility::Public
+    );
+}
+
 fn remote_ref_state(hash: &str, branches: &[(&str, &str)]) -> RemoteRefState {
     RemoteRefState {
         hash: hash.to_string(),
