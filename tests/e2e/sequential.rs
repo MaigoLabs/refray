@@ -341,6 +341,7 @@ name = "all"
 sync_visibility = "all"
 repo_whitelist = '{}'
 create_missing = {}
+delete_missing = true
 visibility = "public"
 conflict_resolution = "{}"
 
@@ -615,6 +616,7 @@ namespace = "{}"
         source.wait_branch_absent(&repo, "delete-me")?;
         self.sync_repo(&repo, [])?;
         self.assert_branch_absent_everywhere(&repo, "delete-me")?;
+        self.assert_backup_bundle_contains(&repo, "refs/refray-backups/branches/")?;
         Ok(())
     }
 
@@ -629,6 +631,7 @@ namespace = "{}"
         source.wait_repo_absent(&repo)?;
         self.sync_repo(&repo, [])?;
         self.assert_repo_absent_everywhere(&repo)?;
+        self.assert_backup_bundle_contains(&repo, "refs/refray-backups/repos/")?;
         Ok(())
     }
 
@@ -1088,6 +1091,29 @@ namespace = "{}"
             }
             Ok(())
         })
+    }
+
+    fn assert_backup_bundle_contains(&self, repo: &str, marker: &str) -> Result<()> {
+        let bundles = self.backup_bundles_for_repo(repo)?;
+        for bundle in &bundles {
+            let output = Command::new("git")
+                .args(["bundle", "list-heads", bundle.to_str().unwrap()])
+                .output()
+                .context("failed to run git bundle list-heads")?;
+            if output.status.success() && String::from_utf8_lossy(&output.stdout).contains(marker) {
+                return Ok(());
+            }
+        }
+        bail!(
+            "no local backup bundle for {repo} contained {marker}; checked {:?}",
+            bundles
+        )
+    }
+
+    fn backup_bundles_for_repo(&self, repo: &str) -> Result<Vec<PathBuf>> {
+        let mut bundles = Vec::new();
+        collect_backup_bundles(&self.cache_home, repo, &mut bundles)?;
+        Ok(bundles)
     }
 
     fn assert_conflict_branch_exists(&self, repo: &str) -> Result<()> {
@@ -1949,6 +1975,26 @@ fn assert_output_success(output: Output, label: &str, redactor: &Redactor) -> Re
         "{label} failed with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status
     )
+}
+
+fn collect_backup_bundles(dir: &Path, repo: &str, output: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_backup_bundles(&path, repo, output)?;
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) == Some("bundle")
+            && path.to_string_lossy().contains(repo)
+        {
+            output.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn retry(label: &str, mut action: impl FnMut() -> Result<()>) -> Result<()> {

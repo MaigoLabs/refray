@@ -62,6 +62,8 @@ pub struct MirrorConfig {
     pub repo_blacklist: Option<String>,
     #[serde(default = "default_true")]
     pub create_missing: bool,
+    #[serde(default = "default_true")]
+    pub delete_missing: bool,
     #[serde(default)]
     pub visibility: Visibility,
     #[serde(default)]

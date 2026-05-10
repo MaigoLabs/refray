@@ -25,6 +25,7 @@ fn parses_value_tokens() {
         repo_whitelist = "^important-|-mirror$"
         repo_blacklist = "-archive$"
         create_missing = true
+        delete_missing = false
         visibility = "private"
         conflict_resolution = "auto_rebase_pull_request"
 
@@ -57,6 +58,7 @@ fn parses_value_tokens() {
         config.mirrors[0].repo_blacklist,
         Some("-archive$".to_string())
     );
+    assert!(!config.mirrors[0].delete_missing);
     let webhook = config.webhook.unwrap();
     assert!(webhook.install);
     assert_eq!(webhook.url, "https://mirror.example.test/webhook");
@@ -93,6 +95,30 @@ fn config_defaults_jobs() {
 }
 
 #[test]
+fn mirror_defaults_to_deleting_missing_repos_for_existing_configs() {
+    let config: Config = toml::from_str(
+        r#"
+        [[mirrors]]
+        name = "personal"
+        create_missing = true
+
+        [[mirrors.endpoints]]
+        site = "github"
+        kind = "user"
+        namespace = "alice"
+
+        [[mirrors.endpoints]]
+        site = "gitea"
+        kind = "user"
+        namespace = "alice"
+        "#,
+    )
+    .unwrap();
+
+    assert!(config.mirrors[0].delete_missing);
+}
+
+#[test]
 fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
     let config = Config {
         jobs: crate::config::DEFAULT_JOBS,
@@ -108,6 +134,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -137,6 +164,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -241,6 +269,7 @@ fn validation_rejects_duplicate_mirror_endpoints() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -287,6 +316,7 @@ fn mirror_config() -> MirrorConfig {
         repo_whitelist: None,
         repo_blacklist: None,
         create_missing: true,
+        delete_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     }

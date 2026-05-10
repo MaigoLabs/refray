@@ -276,6 +276,44 @@ fn delete_branches_removes_branch_from_target_remotes() {
 }
 
 #[test]
+fn backup_refs_create_restorable_bundle_before_branch_delete() {
+    let fixture = GitFixture::new();
+    let expected = fixture.commit("base", "base", 1_700_000_000);
+    fixture.push_head(&fixture.remote_a, "main");
+    fixture.push_head(&fixture.remote_b, "main");
+
+    let mirror = fixture.mirror();
+    fixture.fetch_all(&mirror);
+    let backup_ref = "refs/refray-backups/branches/main/test/a".to_string();
+    mirror
+        .backup_refs(&[RefBackup {
+            refname: backup_ref.clone(),
+            sha: expected.clone(),
+            description: "branch main before delete".to_string(),
+        }])
+        .unwrap();
+    let bundle = fixture._temp.path().join("branch-backup.bundle");
+    mirror
+        .create_bundle(&bundle, std::slice::from_ref(&backup_ref))
+        .unwrap();
+
+    mirror
+        .delete_branches(
+            &fixture.remotes(),
+            &[BranchDeletion {
+                branch: "main".to_string(),
+                deleted_remotes: vec!["a".to_string()],
+                target_remotes: vec!["b".to_string()],
+            }],
+        )
+        .unwrap();
+
+    let heads = git_output(None, ["bundle", "list-heads", bundle.to_str().unwrap()]);
+    assert!(heads.contains(&expected));
+    assert!(heads.contains(&backup_ref));
+}
+
+#[test]
 fn tag_decisions_mirror_matching_or_missing_tags_and_skip_divergent_tags() {
     let fixture = GitFixture::new();
     let base = fixture.commit("base", "base", 1_700_000_000);

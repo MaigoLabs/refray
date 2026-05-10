@@ -53,6 +53,13 @@ pub struct BranchUpdate {
 }
 
 #[derive(Clone, Debug)]
+pub struct RefBackup {
+    pub refname: String,
+    pub sha: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct BranchRebaseDecision {
     pub branch: String,
     pub sha: String,
@@ -418,6 +425,63 @@ impl GitMirror {
             }
         }
         Ok(())
+    }
+
+    pub fn backup_refs(&self, backups: &[RefBackup]) -> Result<Vec<String>> {
+        let mut refs = Vec::new();
+        for backup in backups {
+            crate::logln!(
+                "  {} {}",
+                style("backup").cyan().bold(),
+                style(&backup.description).dim()
+            );
+            self.run(["update-ref", &backup.refname, &backup.sha])?;
+            refs.push(backup.refname.clone());
+        }
+        Ok(refs)
+    }
+
+    pub fn create_bundle(&self, path: &Path, refs: &[String]) -> Result<bool> {
+        if refs.is_empty() {
+            return Ok(false);
+        }
+        if self.dry_run {
+            crate::logln!(
+                "  {} git bundle create {} {}",
+                style("dry-run").yellow().bold(),
+                style(path.display()).dim(),
+                style(refs.join(" ")).dim()
+            );
+            return Ok(false);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let output = self
+            .command()
+            .arg("bundle")
+            .arg("create")
+            .arg(path)
+            .args(refs)
+            .output()
+            .with_context(|| "failed to run git bundle create")?;
+        if !output.status.success() {
+            let stdout = self
+                .redactor
+                .redact(&String::from_utf8_lossy(&output.stdout));
+            let stderr = self
+                .redactor
+                .redact(&String::from_utf8_lossy(&output.stderr));
+            return Err(GitCommandError::new("git bundle create", stdout, stderr).into());
+        }
+        crate::logln!(
+            "  {} {}",
+            style("backup bundle").cyan().bold(),
+            style(path.display()).dim()
+        );
+        Ok(true)
     }
 
     fn push_branch_update(&self, remote: &RemoteSpec, update: &BranchUpdate) -> Result<()> {

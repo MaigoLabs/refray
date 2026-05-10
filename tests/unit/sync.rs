@@ -175,6 +175,29 @@ fn branch_deletion_decisions_ignore_internal_conflict_branches() {
 }
 
 #[test]
+fn branches_deleted_everywhere_are_backed_up_before_prune() {
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        "github".to_string(),
+        remote_ref_state("a", &[("main", "111")]),
+    );
+    previous.insert(
+        "gitea".to_string(),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+
+    let backups = branches_deleted_everywhere_backups(&previous, &BTreeMap::new(), "stamp");
+
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].sha, "111");
+    assert!(
+        backups[0]
+            .refname
+            .starts_with("refs/refray-backups/branches/")
+    );
+}
+
+#[test]
 fn repo_deletion_decision_propagates_previous_synced_repo_deletion() {
     let mirror = test_mirror();
     let mut previous = BTreeMap::new();
@@ -206,6 +229,35 @@ fn repo_deletion_decision_propagates_previous_synced_repo_deletion() {
             target_remotes: vec![remote_key("gitea")],
         }
     );
+}
+
+#[test]
+fn repo_deletion_decision_is_disabled_by_mirror_policy() {
+    let mut mirror = test_mirror();
+    mirror.delete_missing = false;
+    let mut previous = BTreeMap::new();
+    previous.insert(
+        remote_key("github"),
+        remote_ref_state("a", &[("main", "111")]),
+    );
+    previous.insert(
+        remote_key("gitea"),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+    let mut current = BTreeMap::new();
+    current.insert(
+        remote_key("gitea"),
+        remote_ref_state("b", &[("main", "111")]),
+    );
+
+    let decision = repo_deletion_decision(
+        &mirror,
+        &[endpoint_repo("gitea")],
+        Some(&previous),
+        &current,
+    );
+
+    assert_eq!(decision, RepoDeletionDecision::None);
 }
 
 #[test]
@@ -475,6 +527,7 @@ fn test_mirror() -> MirrorConfig {
         repo_whitelist: None,
         repo_blacklist: None,
         create_missing: true,
+        delete_missing: true,
         visibility: crate::config::Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     }

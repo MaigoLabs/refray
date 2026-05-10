@@ -65,6 +65,9 @@ where
     let endpoints = prompt_sync_group_endpoints(reader, writer, config, &[])?;
     let sync_visibility = prompt_sync_visibility(reader, writer, None)?;
     let repo_filters = prompt_repo_filters(reader, writer, None)?;
+    write_deletion_backup_notice(writer)?;
+    let create_missing = prompt_create_missing(reader, writer, None)?;
+    let delete_missing = prompt_delete_missing(reader, writer, None)?;
     let conflict_resolution = prompt_conflict_resolution(reader, writer, None)?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
@@ -72,7 +75,8 @@ where
         sync_visibility,
         repo_whitelist: repo_filters.whitelist,
         repo_blacklist: repo_filters.blacklist,
-        create_missing: true,
+        create_missing,
+        delete_missing,
         visibility: Visibility::Private,
         conflict_resolution,
     });
@@ -276,6 +280,8 @@ where
                     whitelist: config.mirrors[index - 1].repo_whitelist.clone(),
                     blacklist: config.mirrors[index - 1].repo_blacklist.clone(),
                 };
+                let existing_create_missing = config.mirrors[index - 1].create_missing;
+                let existing_delete_missing = config.mirrors[index - 1].delete_missing;
                 let existing_conflict_resolution =
                     config.mirrors[index - 1].conflict_resolution.clone();
                 let endpoints = prompt_sync_group_endpoints(reader, writer, config, &existing)?;
@@ -283,6 +289,11 @@ where
                     prompt_sync_visibility(reader, writer, Some(&existing_sync_visibility))?;
                 let repo_filters =
                     prompt_repo_filters(reader, writer, Some(&existing_repo_filters))?;
+                write_deletion_backup_notice(writer)?;
+                let create_missing =
+                    prompt_create_missing(reader, writer, Some(existing_create_missing))?;
+                let delete_missing =
+                    prompt_delete_missing(reader, writer, Some(existing_delete_missing))?;
                 let conflict_resolution = prompt_conflict_resolution(
                     reader,
                     writer,
@@ -292,6 +303,8 @@ where
                 config.mirrors[index - 1].sync_visibility = sync_visibility;
                 config.mirrors[index - 1].repo_whitelist = repo_filters.whitelist;
                 config.mirrors[index - 1].repo_blacklist = repo_filters.blacklist;
+                config.mirrors[index - 1].create_missing = create_missing;
+                config.mirrors[index - 1].delete_missing = delete_missing;
                 config.mirrors[index - 1].conflict_resolution = conflict_resolution;
                 prompt_webhook_setup(reader, writer, config)?;
                 writeln!(writer, "updated sync group {index}")?;
@@ -570,6 +583,51 @@ where
         bail!(error);
     }
     Ok(parse_repo_pattern(&value))
+}
+
+fn write_deletion_backup_notice<W>(writer: &mut W) -> Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        writer,
+        "Deletion backups: refray keeps a local backup before propagating repository or branch deletes."
+    )?;
+    Ok(())
+}
+
+fn prompt_create_missing<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    existing: Option<bool>,
+) -> Result<bool>
+where
+    R: BufRead,
+    W: Write,
+{
+    prompt_bool(
+        reader,
+        writer,
+        "Create repositories that are missing from an endpoint?",
+        existing.unwrap_or(true),
+    )
+}
+
+fn prompt_delete_missing<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    existing: Option<bool>,
+) -> Result<bool>
+where
+    R: BufRead,
+    W: Write,
+{
+    prompt_bool(
+        reader,
+        writer,
+        "When a previously synced repository is deleted from one endpoint, delete it everywhere?",
+        existing.unwrap_or(true),
+    )
 }
 
 fn sync_visibility_value(sync_visibility: &SyncVisibility) -> &'static str {

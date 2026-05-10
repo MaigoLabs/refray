@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use console::style;
@@ -13,7 +14,7 @@ use crate::config::{
     RepoNameFilter, SyncVisibility, Visibility, default_work_dir, validate_config,
 };
 use crate::git::{
-    BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RemoteSpec,
+    BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RefBackup, RemoteSpec,
     is_disabled_repository_error, ls_remote_refs, safe_remote_name,
 };
 use crate::logging;
@@ -523,6 +524,13 @@ enum RepoStateUpdate {
     Remove,
 }
 
+fn mirror_repo_path(context: &RepoSyncContext<'_>, repo_name: &str) -> PathBuf {
+    context
+        .work_dir
+        .join(safe_remote_name(&context.mirror.name))
+        .join(format!("{}.git", safe_remote_name(repo_name)))
+}
+
 fn sync_repo(
     context: &RepoSyncContext<'_>,
     repo_name: &str,
@@ -573,14 +581,18 @@ fn sync_repo(
         return Ok(RepoSyncOutcome::default());
     }
 
-    let path = context
-        .work_dir
-        .join(safe_remote_name(&context.mirror.name))
-        .join(format!("{}.git", safe_remote_name(repo_name)));
+    let path = mirror_repo_path(context, repo_name);
     let mirror_repo = GitMirror::open(path, context.redactor.clone(), context.dry_run)?;
 
     mirror_repo.configure_remotes(&initial_remotes)?;
     let cached_ref_state = cached_ref_state(&mirror_repo, &initial_remotes)?;
+    backup_branches_deleted_everywhere(
+        context,
+        &mirror_repo,
+        repo_name,
+        detailed_repo_ref_state(previous_repo_refs).or(cached_ref_state.as_ref()),
+        &initial_ref_state,
+    )?;
     for remote in &initial_remotes {
         if let Err(error) = mirror_repo.fetch_remote(remote) {
             if is_disabled_repository_error(&error) {
@@ -635,6 +647,7 @@ fn sync_repo(
     let result = push_repo_refs(
         context,
         &mirror_repo,
+        repo_name,
         &remotes,
         repos,
         detailed_repo_ref_state(previous_repo_refs).or(cached_ref_state.as_ref()),
@@ -682,6 +695,7 @@ fn handle_repo_deletion(
                 style(repo_name).cyan(),
                 deleted_remotes.join("+")
             );
+            backup_deleted_repo(context, repo_name, repos, previous_refs, current_refs)?;
             Ok(Some(RepoSyncOutcome {
                 state_update: (!context.dry_run).then_some(RepoStateUpdate::Remove),
             }))
@@ -697,6 +711,7 @@ fn handle_repo_deletion(
                 deleted_remotes.join("+"),
                 target_remotes.join("+")
             );
+            backup_deleted_repo(context, repo_name, repos, previous_refs, current_refs)?;
             delete_repos(context, repo_name, repos, &target_remotes)?;
             Ok(Some(RepoSyncOutcome {
                 state_update: (!context.dry_run).then_some(RepoStateUpdate::Remove),
@@ -718,6 +733,65 @@ fn handle_repo_deletion(
             Ok(Some(RepoSyncOutcome::default()))
         }
     }
+}
+
+fn backup_deleted_repo(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    repos: &[EndpointRepo],
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<()> {
+    if context.dry_run {
+        crate::logln!(
+            "  {} {} {}",
+            style("dry-run").yellow().bold(),
+            style("would create local backup for deleted repo").dim(),
+            style(repo_name).cyan()
+        );
+        return Ok(());
+    }
+
+    let path = mirror_repo_path(context, repo_name);
+    if repos.is_empty() && !path.exists() {
+        bail!(
+            "cannot back up deleted repo {} because local mirror cache {} is missing",
+            repo_name,
+            path.display()
+        );
+    }
+
+    let mirror_repo = GitMirror::open(path, context.redactor.clone(), false)?;
+    if !repos.is_empty() {
+        let remotes = remote_specs(context, repos)?;
+        mirror_repo.configure_remotes(&remotes)?;
+        for remote in &remotes {
+            mirror_repo.fetch_remote(remote).with_context(|| {
+                format!("failed to fetch {} for deletion backup", remote.display)
+            })?;
+        }
+    }
+
+    let stamp = backup_stamp()?;
+    let refs_to_backup = if current_refs.is_empty() {
+        previous_refs.unwrap_or(current_refs)
+    } else {
+        current_refs
+    };
+    let backups = repo_ref_backups(repo_name, refs_to_backup, &stamp);
+    if backups.is_empty() {
+        crate::logln!(
+            "  {} {} has no refs to bundle before deletion",
+            style("backup").yellow().bold(),
+            style(repo_name).cyan()
+        );
+        return Ok(());
+    }
+
+    let refs = mirror_repo.backup_refs(&backups)?;
+    let bundle_path = backup_dir(context, repo_name).join(format!("repo-{stamp}.bundle"));
+    mirror_repo.create_bundle(&bundle_path, &refs)?;
+    Ok(())
 }
 
 fn delete_repos(
@@ -874,6 +948,7 @@ fn remote_specs(context: &RepoSyncContext<'_>, repos: &[EndpointRepo]) -> Result
 fn push_repo_refs(
     context: &RepoSyncContext<'_>,
     mirror_repo: &GitMirror,
+    repo_name: &str,
     remotes: &[RemoteSpec],
     repos: &[EndpointRepo],
     previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
@@ -972,6 +1047,13 @@ fn push_repo_refs(
     {
         if !branch_deletions.is_empty() {
             print_branch_deletions(&branch_deletions);
+            backup_deleted_branches(
+                context,
+                mirror_repo,
+                repo_name,
+                &branch_deletions,
+                current_refs,
+            )?;
             mirror_repo.delete_branches(remotes, &branch_deletions)?;
         }
         if !cleanup_branches.is_empty() {
@@ -994,6 +1076,13 @@ fn push_repo_refs(
     }
     if !branch_deletions.is_empty() {
         print_branch_deletions(&branch_deletions);
+        backup_deleted_branches(
+            context,
+            mirror_repo,
+            repo_name,
+            &branch_deletions,
+            current_refs,
+        )?;
         mirror_repo.delete_branches(remotes, &branch_deletions)?;
     }
     if !branches_to_push.is_empty() {
@@ -1029,6 +1118,64 @@ fn push_repo_refs(
             || !cleanup_branches.is_empty(),
         had_conflicts: had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts,
     })
+}
+
+fn backup_deleted_branches(
+    context: &RepoSyncContext<'_>,
+    mirror_repo: &GitMirror,
+    repo_name: &str,
+    deletions: &[BranchDeletion],
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<()> {
+    if context.dry_run {
+        crate::logln!(
+            "  {} {} deleted branch backup{}",
+            style("dry-run").yellow().bold(),
+            style("would create").dim(),
+            if deletions.len() == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
+
+    let stamp = backup_stamp()?;
+    let backups = branch_ref_backups(deletions, current_refs, &stamp);
+    if backups.is_empty() {
+        bail!("cannot back up branch deletion because no target branch refs were available");
+    }
+    let refs = mirror_repo.backup_refs(&backups)?;
+    let bundle_path = backup_dir(context, repo_name).join(format!("branches-{stamp}.bundle"));
+    mirror_repo.create_bundle(&bundle_path, &refs)?;
+    Ok(())
+}
+
+fn backup_branches_deleted_everywhere(
+    context: &RepoSyncContext<'_>,
+    mirror_repo: &GitMirror,
+    repo_name: &str,
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<()> {
+    let Some(previous_refs) = previous_refs else {
+        return Ok(());
+    };
+    let stamp = backup_stamp()?;
+    let backups = branches_deleted_everywhere_backups(previous_refs, current_refs, &stamp);
+    if backups.is_empty() {
+        return Ok(());
+    }
+    if context.dry_run {
+        crate::logln!(
+            "  {} {} branch backup{} for refs deleted everywhere",
+            style("dry-run").yellow().bold(),
+            style("would create").dim(),
+            if backups.len() == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
+    let refs = mirror_repo.backup_refs(&backups)?;
+    let bundle_path = backup_dir(context, repo_name).join(format!("branches-{stamp}.bundle"));
+    mirror_repo.create_bundle(&bundle_path, &refs)?;
+    Ok(())
 }
 
 enum BranchConflictResolution {
@@ -1342,6 +1489,140 @@ fn conflict_pr_base_branch(branch: &str) -> Option<String> {
     decode_hex_component(encoded)
 }
 
+fn backup_dir(context: &RepoSyncContext<'_>, repo_name: &str) -> PathBuf {
+    context
+        .work_dir
+        .join("backups")
+        .join(safe_remote_name(&context.mirror.name))
+        .join(safe_remote_name(repo_name))
+}
+
+fn backup_stamp() -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .with_context(|| "system clock is before UNIX_EPOCH")?;
+    Ok(format!("{}-{:09}", now.as_secs(), now.subsec_nanos()))
+}
+
+fn branch_ref_backups(
+    deletions: &[BranchDeletion],
+    current_refs: &BTreeMap<String, RemoteRefState>,
+    stamp: &str,
+) -> Vec<RefBackup> {
+    let mut backups = Vec::new();
+    let mut seen = BTreeSet::new();
+    for deletion in deletions {
+        for remote in &deletion.target_remotes {
+            let Some(sha) = current_refs
+                .get(remote)
+                .and_then(|refs| refs.branches.get(&deletion.branch))
+            else {
+                continue;
+            };
+            if !seen.insert((deletion.branch.clone(), sha.clone())) {
+                continue;
+            }
+            backups.push(RefBackup {
+                refname: format!(
+                    "refs/refray-backups/branches/{}/{}/{}",
+                    hex_component(&deletion.branch),
+                    stamp,
+                    hex_component(remote)
+                ),
+                sha: sha.clone(),
+                description: format!(
+                    "branch {} from {} before propagated deletion",
+                    deletion.branch, remote
+                ),
+            });
+        }
+    }
+    backups
+}
+
+fn branches_deleted_everywhere_backups(
+    previous_refs: &BTreeMap<String, RemoteRefState>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+    stamp: &str,
+) -> Vec<RefBackup> {
+    let mut branches = BTreeSet::new();
+    for refs in previous_refs.values() {
+        branches.extend(
+            refs.branches
+                .keys()
+                .filter(|branch| !is_internal_conflict_branch(branch))
+                .cloned(),
+        );
+    }
+
+    let mut backups = Vec::new();
+    for branch in branches {
+        if current_refs
+            .values()
+            .any(|refs| refs.branches.contains_key(&branch))
+        {
+            continue;
+        }
+        let mut seen_shas = BTreeSet::new();
+        for (remote, refs) in previous_refs {
+            let Some(sha) = refs.branches.get(&branch) else {
+                continue;
+            };
+            if !seen_shas.insert(sha.clone()) {
+                continue;
+            }
+            backups.push(RefBackup {
+                refname: format!(
+                    "refs/refray-backups/branches/{}/{}/deleted-everywhere-{}",
+                    hex_component(&branch),
+                    stamp,
+                    hex_component(remote)
+                ),
+                sha: sha.clone(),
+                description: format!(
+                    "branch {branch} from {remote} before all endpoints pruned it"
+                ),
+            });
+        }
+    }
+    backups
+}
+
+fn repo_ref_backups(
+    repo_name: &str,
+    refs_by_remote: &BTreeMap<String, RemoteRefState>,
+    stamp: &str,
+) -> Vec<RefBackup> {
+    let mut backups = Vec::new();
+    for (remote, refs) in refs_by_remote {
+        for (branch, sha) in &refs.branches {
+            backups.push(RefBackup {
+                refname: format!(
+                    "refs/refray-backups/repos/{}/{}/heads/{}",
+                    stamp,
+                    hex_component(remote),
+                    hex_component(branch)
+                ),
+                sha: sha.clone(),
+                description: format!("repo {repo_name} branch {branch} from {remote}"),
+            });
+        }
+        for (tag, sha) in &refs.tags {
+            backups.push(RefBackup {
+                refname: format!(
+                    "refs/refray-backups/repos/{}/{}/tags/{}",
+                    stamp,
+                    hex_component(remote),
+                    hex_component(tag)
+                ),
+                sha: sha.clone(),
+                description: format!("repo {repo_name} tag {tag} from {remote}"),
+            });
+        }
+    }
+    backups
+}
+
 fn hex_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(value.len() * 2);
@@ -1504,6 +1785,9 @@ fn repo_deletion_decision(
     previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
     current_refs: &BTreeMap<String, RemoteRefState>,
 ) -> RepoDeletionDecision {
+    if !mirror.delete_missing {
+        return RepoDeletionDecision::None;
+    }
     let Some(previous_refs) = previous_refs else {
         return RepoDeletionDecision::None;
     };

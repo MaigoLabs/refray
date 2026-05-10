@@ -14,6 +14,8 @@ fn wizard_builds_sync_group_from_profile_urls() {
         "",
         "",
         "",
+        "",
+        "",
         "n",
         "4",
     ]
@@ -46,6 +48,7 @@ fn wizard_builds_sync_group_from_profile_urls() {
     assert_eq!(config.mirrors[0].endpoints[1].namespace, "azalea");
     assert_eq!(config.mirrors[0].sync_visibility, SyncVisibility::All);
     assert!(config.mirrors[0].create_missing);
+    assert!(config.mirrors[0].delete_missing);
     assert_eq!(config.mirrors[0].visibility, Visibility::Private);
     assert_eq!(
         config.mirrors[0].conflict_resolution,
@@ -54,6 +57,9 @@ fn wizard_builds_sync_group_from_profile_urls() {
 
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("1. github.com/hykilpikonna <-> gitea.example.test/azalea"));
+    assert!(output.contains("Deletion backups: refray keeps a local backup"));
+    assert!(output.contains("Create repositories that are missing from an endpoint?"));
+    assert!(output.contains("delete it everywhere?"));
     assert!(output.contains("Add another sync group"));
     assert!(output.contains("Edit an existing group"));
     assert!(output.contains("Delete an existing group"));
@@ -77,6 +83,8 @@ fn wizard_can_build_three_way_sync() {
         "",
         "",
         "",
+        "",
+        "",
         "n",
         "4",
     ]
@@ -93,6 +101,35 @@ fn wizard_can_build_three_way_sync() {
 }
 
 #[test]
+fn wizard_can_disable_missing_repo_creation_and_repo_delete_propagation() {
+    let input = [
+        "https://github.com/alice",
+        "gh-token",
+        "",
+        "https://gitea.example.test/alice",
+        "gt-token",
+        "",
+        "n",
+        "",
+        "",
+        "n",
+        "n",
+        "",
+        "n",
+        "4",
+    ]
+    .join("\n")
+        + "\n";
+    let mut reader = Cursor::new(input.as_bytes());
+    let mut output = Vec::new();
+
+    let config = run_config_wizard_with_io(Config::default(), &mut reader, &mut output).unwrap();
+
+    assert!(!config.mirrors[0].create_missing);
+    assert!(!config.mirrors[0].delete_missing);
+}
+
+#[test]
 fn wizard_can_enable_webhooks() {
     let input = [
         "https://github.com/alice",
@@ -102,6 +139,8 @@ fn wizard_can_enable_webhooks() {
         "gt-token",
         "",
         "n",
+        "",
+        "",
         "",
         "",
         "",
@@ -156,6 +195,8 @@ fn wizard_reuses_existing_credentials_for_same_instance() {
         "https://github.com/bob",
         "",
         "n",
+        "",
+        "",
         "",
         "",
         "",
@@ -214,6 +255,7 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -243,6 +285,7 @@ fn wizard_can_ask_to_run_full_sync_after_config() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -319,6 +362,7 @@ fn wizard_edits_existing_sync_group_from_menu() {
             repo_whitelist: Some("^important-".to_string()),
             repo_blacklist: Some("-archive$".to_string()),
             create_missing: false,
+            delete_missing: true,
             visibility: Visibility::Public,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -336,6 +380,8 @@ fn wizard_edits_existing_sync_group_from_menu() {
         "y",
         "^public-",
         "-skip$",
+        "",
+        "",
         "",
         "n",
         "4",
@@ -356,6 +402,7 @@ fn wizard_edits_existing_sync_group_from_menu() {
     assert_eq!(mirror.endpoints[1].site, "gitlab");
     assert_eq!(mirror.endpoints[1].namespace, "bob");
     assert!(!mirror.create_missing);
+    assert!(mirror.delete_missing);
     assert_eq!(mirror.sync_visibility, SyncVisibility::Public);
     assert_eq!(mirror.repo_whitelist, Some("^public-".to_string()));
     assert_eq!(mirror.repo_blacklist, Some("-skip$".to_string()));
@@ -406,12 +453,13 @@ fn wizard_prefills_existing_sync_group_when_editing() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
         webhook: None,
     };
-    let input = ["2", "1", "", "", "", "", "n", "", "", "", "n", "4"].join("\n") + "\n";
+    let input = ["2", "1", "", "", "", "", "n", "", "", "", "", "", "n", "4"].join("\n") + "\n";
     let mut reader = Cursor::new(input.as_bytes());
     let mut output = Vec::new();
 
@@ -470,6 +518,7 @@ fn wizard_deletes_existing_sync_group_from_menu() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -529,6 +578,7 @@ fn wizard_can_go_back_from_delete_menu() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],

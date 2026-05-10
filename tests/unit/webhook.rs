@@ -115,6 +115,7 @@ fn matches_jobs_by_provider_and_namespace() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -142,6 +143,7 @@ fn matching_jobs_respects_repo_name_filters() {
         repo_whitelist: Some("^important-".to_string()),
         repo_blacklist: Some("-archive$".to_string()),
         create_missing: true,
+        delete_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     };
@@ -360,6 +362,7 @@ fn uninstall_webhooks_skips_blocked_provider_access() {
             repo_whitelist: None,
             repo_blacklist: None,
             create_missing: true,
+            delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
         }],
@@ -713,6 +716,7 @@ fn filtered_mirror() -> MirrorConfig {
         repo_whitelist: Some("^important-".to_string()),
         repo_blacklist: Some("-archive$".to_string()),
         create_missing: true,
+        delete_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
     }

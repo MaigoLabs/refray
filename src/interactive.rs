@@ -115,6 +115,9 @@ fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<(
     let endpoints = prompt_sync_group_endpoints_styled(config, theme, &[])?;
     let sync_visibility = prompt_sync_visibility_styled(theme, None)?;
     let repo_filters = prompt_repo_filters_styled(theme, None)?;
+    print_deletion_backup_notice_styled();
+    let create_missing = prompt_create_missing_styled(theme, None)?;
+    let delete_missing = prompt_delete_missing_styled(theme, None)?;
     let conflict_resolution = prompt_conflict_resolution_styled(theme, None)?;
     config.upsert_mirror(MirrorConfig {
         name: next_mirror_name(config),
@@ -122,7 +125,8 @@ fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<(
         sync_visibility,
         repo_whitelist: repo_filters.whitelist,
         repo_blacklist: repo_filters.blacklist,
-        create_missing: true,
+        create_missing,
+        delete_missing,
         visibility: Visibility::Private,
         conflict_resolution,
     });
@@ -447,6 +451,8 @@ fn edit_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<
     let existing_sync_visibility = config.mirrors[index].sync_visibility.clone();
     let existing_repo_whitelist = config.mirrors[index].repo_whitelist.clone();
     let existing_repo_blacklist = config.mirrors[index].repo_blacklist.clone();
+    let existing_create_missing = config.mirrors[index].create_missing;
+    let existing_delete_missing = config.mirrors[index].delete_missing;
     let existing_conflict_resolution = config.mirrors[index].conflict_resolution.clone();
     let endpoints = prompt_sync_group_endpoints_styled(config, theme, &existing)?;
     let sync_visibility = prompt_sync_visibility_styled(theme, Some(&existing_sync_visibility))?;
@@ -455,12 +461,17 @@ fn edit_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<
         blacklist: existing_repo_blacklist,
     };
     let repo_filters = prompt_repo_filters_styled(theme, Some(&existing_repo_filters))?;
+    print_deletion_backup_notice_styled();
+    let create_missing = prompt_create_missing_styled(theme, Some(existing_create_missing))?;
+    let delete_missing = prompt_delete_missing_styled(theme, Some(existing_delete_missing))?;
     let conflict_resolution =
         prompt_conflict_resolution_styled(theme, Some(&existing_conflict_resolution))?;
     config.mirrors[index].endpoints = endpoints;
     config.mirrors[index].sync_visibility = sync_visibility;
     config.mirrors[index].repo_whitelist = repo_filters.whitelist;
     config.mirrors[index].repo_blacklist = repo_filters.blacklist;
+    config.mirrors[index].create_missing = create_missing;
+    config.mirrors[index].delete_missing = delete_missing;
     config.mirrors[index].conflict_resolution = conflict_resolution;
     prompt_webhook_setup_styled(config, theme)?;
     println!(
@@ -817,6 +828,31 @@ fn prompt_repo_pattern_styled(
     Ok(parse_repo_pattern(&value))
 }
 
+fn print_deletion_backup_notice_styled() {
+    println!();
+    println!(
+        "{} {}",
+        style("Deletion backups").cyan().bold(),
+        style("refray keeps a local backup before propagating repository or branch deletes").dim()
+    );
+}
+
+fn prompt_create_missing_styled(theme: &ColorfulTheme, existing: Option<bool>) -> Result<bool> {
+    Confirm::with_theme(theme)
+        .with_prompt("Create repositories that are missing from an endpoint?")
+        .default(existing.unwrap_or(true))
+        .interact()
+        .map_err(Into::into)
+}
+
+fn prompt_delete_missing_styled(theme: &ColorfulTheme, existing: Option<bool>) -> Result<bool> {
+    Confirm::with_theme(theme)
+        .with_prompt("When a previously synced repository is deleted from one endpoint, delete it everywhere?")
+        .default(existing.unwrap_or(true))
+        .interact()
+        .map_err(Into::into)
+}
+
 fn validate_repo_pattern(value: &str) -> std::result::Result<(), String> {
     let Some(pattern) = parse_repo_pattern(value) else {
         return Ok(());
@@ -913,10 +949,11 @@ fn sync_group_summary(config: &Config, mirror: &MirrorConfig) -> String {
         .collect::<Vec<_>>()
         .join(" <-> ");
     format!(
-        "{} ({}, {}, {})",
+        "{} ({}, {}, {}, {})",
         endpoints,
         sync_visibility_label(&mirror.sync_visibility),
         repo_filter_label(mirror),
+        repo_lifecycle_label(mirror),
         conflict_resolution_label(&mirror.conflict_resolution)
     )
 }
@@ -936,6 +973,22 @@ fn repo_filter_label(mirror: &MirrorConfig) -> String {
         (None, Some(_)) => "repos: blacklist".to_string(),
         (Some(_), Some(_)) => "repos: whitelist + blacklist".to_string(),
     }
+}
+
+fn repo_lifecycle_label(mirror: &MirrorConfig) -> String {
+    format!(
+        "missing: {}, deletes: {}",
+        if mirror.create_missing {
+            "create"
+        } else {
+            "skip"
+        },
+        if mirror.delete_missing {
+            "propagate"
+        } else {
+            "keep"
+        }
+    )
 }
 
 fn conflict_resolution_label(strategy: &ConflictResolutionStrategy) -> &'static str {
