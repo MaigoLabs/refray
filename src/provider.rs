@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use console::style;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
-use crate::config::{EndpointConfig, NamespaceKind, ProviderKind, SiteConfig, Visibility};
+use crate::config::{
+    Config, EndpointConfig, MirrorConfig, NamespaceKind, ProviderKind, RepoNameFilter, SiteConfig,
+    Visibility,
+};
 
 #[derive(Clone, Debug)]
 pub struct RemoteRepo {
@@ -34,6 +38,54 @@ pub struct PullRequestRequest {
 #[derive(Clone, Debug)]
 pub struct PullRequestInfo {
     pub url: Option<String>,
+}
+
+pub fn list_mirror_repos(
+    config: &Config,
+    mirror: &MirrorConfig,
+    repo_filter: &RepoNameFilter,
+    jobs: usize,
+) -> Result<Vec<EndpointRepo>> {
+    let endpoint_jobs = mirror
+        .endpoints
+        .iter()
+        .cloned()
+        .enumerate()
+        .collect::<Vec<_>>();
+    let worker_count = jobs.min(endpoint_jobs.len());
+    if worker_count > 1 {
+        crate::logln!(
+            "  {} listing repositories with {} workers",
+            style("jobs").cyan().bold(),
+            worker_count
+        );
+    }
+
+    let mut listed = crate::parallel::map(endpoint_jobs, jobs, |(index, endpoint)| {
+        let site = config.site(&endpoint.site).unwrap();
+        let client = ProviderClient::new(site)?;
+        crate::logln!(
+            "  {} {}",
+            style("list").cyan().bold(),
+            style(endpoint.label()).dim()
+        );
+        let repos = client
+            .list_repos(&endpoint)
+            .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
+        let repos = repos
+            .into_iter()
+            .filter(|repo| mirror.sync_visibility.matches_private(repo.private))
+            .filter(|repo| repo_filter.matches(&repo.name))
+            .map(|repo| EndpointRepo {
+                endpoint: endpoint.clone(),
+                repo,
+            })
+            .collect::<Vec<_>>();
+        Ok((index, repos))
+    })?;
+    listed.sort_by_key(|(index, _)| *index);
+
+    Ok(listed.into_iter().flat_map(|(_, repos)| repos).collect())
 }
 
 pub struct ProviderClient<'a> {

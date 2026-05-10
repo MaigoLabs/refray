@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "refray";
-pub const DEFAULT_JOBS: usize = 4;
+pub const DEFAULT_JOBS: usize = 10;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {

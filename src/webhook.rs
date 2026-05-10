@@ -18,7 +18,7 @@ use crate::config::{
     Config, EndpointConfig, MirrorConfig, ProviderKind, RepoNameFilter, default_work_dir,
     validate_config,
 };
-use crate::provider::{EndpointRepo, ProviderClient, RemoteRepo};
+use crate::provider::{EndpointRepo, ProviderClient, RemoteRepo, list_mirror_repos};
 use crate::state::{load_toml_or_default, save_toml};
 use crate::sync::{SyncOptions, sync_all};
 
@@ -189,31 +189,17 @@ pub fn install_webhooks(config: &Config, options: WebhookInstallOptions) -> Resu
         );
         let repo_filter = mirror.repo_filter()?;
         let mut tasks = Vec::new();
-        for endpoint in &mirror.endpoints {
-            let site = config.site(&endpoint.site).unwrap();
-            let client = ProviderClient::new(site)?;
-            crate::logln!(
-                "  {} {}",
-                style("list").cyan().bold(),
-                style(endpoint.label()).dim()
-            );
-            let repos = client
-                .list_repos(endpoint)
-                .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
-            for repo in repos
-                .into_iter()
-                .filter(|repo| webhook_repo_matches(mirror, &repo_filter, repo))
-            {
-                tasks.push(WebhookInstallTask {
-                    site: site.clone(),
-                    group: mirror.name.clone(),
-                    endpoint: endpoint.clone(),
-                    repo,
-                    url: options.url.clone(),
-                    secret: options.secret.clone(),
-                    dry_run: options.dry_run,
-                });
-            }
+        for endpoint_repo in list_mirror_repos(config, mirror, &repo_filter, options.jobs)? {
+            let site = config.site(&endpoint_repo.endpoint.site).unwrap();
+            tasks.push(WebhookInstallTask {
+                site: site.clone(),
+                group: mirror.name.clone(),
+                endpoint: endpoint_repo.endpoint,
+                repo: endpoint_repo.repo,
+                url: options.url.clone(),
+                secret: options.secret.clone(),
+                dry_run: options.dry_run,
+            });
         }
         run_install_tasks(tasks, options.jobs, Arc::clone(&state))?;
     }
@@ -242,30 +228,16 @@ pub fn uninstall_webhooks(config: &Config, options: WebhookUninstallOptions) -> 
             style(&mirror.name).bold()
         );
         let repo_filter = mirror.repo_filter()?;
-        for endpoint in &mirror.endpoints {
-            let site = config.site(&endpoint.site).unwrap();
-            let client = ProviderClient::new(site)?;
-            crate::logln!(
-                "  {} {}",
-                style("list").cyan().bold(),
-                style(endpoint.label()).dim()
-            );
-            let repos = client
-                .list_repos(endpoint)
-                .with_context(|| format!("failed to list repos for {}", endpoint.label()))?;
-            for repo in repos
-                .into_iter()
-                .filter(|repo| webhook_repo_matches(mirror, &repo_filter, repo))
-            {
-                tasks.push(WebhookUninstallTask {
-                    group: mirror.name.clone(),
-                    site: site.clone(),
-                    endpoint: endpoint.clone(),
-                    repo,
-                    url: options.url.clone(),
-                    dry_run: options.dry_run,
-                });
-            }
+        for endpoint_repo in list_mirror_repos(config, mirror, &repo_filter, options.jobs)? {
+            let site = config.site(&endpoint_repo.endpoint.site).unwrap();
+            tasks.push(WebhookUninstallTask {
+                group: mirror.name.clone(),
+                site: site.clone(),
+                endpoint: endpoint_repo.endpoint,
+                repo: endpoint_repo.repo,
+                url: options.url.clone(),
+                dry_run: options.dry_run,
+            });
         }
     }
     let removed_keys = run_uninstall_tasks(tasks, options.jobs)?;
