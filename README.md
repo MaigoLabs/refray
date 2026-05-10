@@ -1,8 +1,8 @@
-# refray
+<p align="center">
+  <img src="./docs/refray.png" alt="refray logo" width="50%"/>
+</p>
 
-<center>
-  <img src="./docs/refray.png" alt="refray logo" width="200"/>
-</center>
+# refray
 
 A tool to keep your repos in sync across all git platforms, while being able to work from everywhere all at once. 
 
