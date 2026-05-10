@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/refray.png" alt="refray logo" width="50%"/>
+  <img src="./docs/refray.png" alt="refray logo" width="70%"/>
 </p>
 
 # refray
