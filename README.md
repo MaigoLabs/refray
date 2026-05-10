@@ -21,6 +21,33 @@ Supported platforms: GitHub, GitLab, Gitea, Forgejo
 > [!NOTE]
 > My cat made this codebase, meow
 
+![demo](./docs/demo.webp)
+
+<details><summary>Demo generation</summary>
+
+The demo was rendered from an asciinema cast with capped idle pauses, Sarasa Mono SC, a One Half Dark palette with lighter dark-gray ANSI slots, and a larger font:
+
+```sh
+agg --idle-time-limit 1 \
+  --theme '282C34,DCDFE4,5C6370,E06C75,98C379,E5C07B,61AFEF,C678DD,56B6C2,DCDFE4,7F848E,E06C75,98C379,E5C07B,61AFEF,C678DD,56B6C2,DCDFE4' \
+  --text-font-family 'Sarasa Mono SC' \
+  --font-size 24 \
+  --cols 160 \
+  --rows 42 \
+  ../out.cast \
+  demo.gif
+
+ffmpeg -i demo.gif \
+  -loop 0 \
+  -c:v libwebp_anim \
+  -lossless 1 \
+  -compression_level 6 \
+  -q:v 100 \
+  docs/demo.webp
+```
+
+</details>
+
 
 ## Install
 
@@ -250,4 +277,3 @@ REFRAY_E2E_ALLOW_DESTRUCTIVE=1 \
 ```
 
 By default cleanup only deletes repositories named `refray-e2e-*`. To start by deleting every owned repository visible to the configured accounts, set `REFRAY_E2E_CLEAR_ALL_REPOS=DELETE_ALL_OWNED_REPOS`. Provider skips (`REFRAY_E2E_SKIP_GITHUB`, `REFRAY_E2E_SKIP_GITLAB`, `REFRAY_E2E_SKIP_GITEA`, `REFRAY_E2E_SKIP_FORGEJO`) and `REFRAY_E2E_ALLOW_PARTIAL=1` are available for local debugging, but the full support check should run with all four providers.
-
