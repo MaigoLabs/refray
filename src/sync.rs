@@ -11,7 +11,7 @@ use regex::Regex;
 
 use crate::config::{
     Config, ConflictResolutionStrategy, DEFAULT_JOBS, EndpointConfig, MirrorConfig, NamespaceKind,
-    RepoNameFilter, SyncVisibility, Visibility, default_work_dir, validate_config,
+    ProviderKind, RepoNameFilter, SyncVisibility, Visibility, default_work_dir, validate_config,
 };
 use crate::git::{
     BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RefBackup, RemoteSpec,
@@ -530,7 +530,13 @@ fn ensure_missing_repos(
     let description = template.and_then(|repo| repo.description);
     let expected_private = matches!(create_visibility, Visibility::Private);
     let create_jobs = missing.into_iter().enumerate().collect::<Vec<_>>();
-    let mut created = crate::parallel::map(create_jobs, context.jobs, |(index, endpoint)| {
+    let created = crate::parallel::map(create_jobs, context.jobs, |(index, endpoint)| {
+        let site = context.config.site(&endpoint.site).unwrap();
+        if site.provider == ProviderKind::Gitlab && !is_supported_gitlab_project_path(repo_name) {
+            log_invalid_gitlab_project_name_skip(repo_name, &endpoint);
+            return Ok(None);
+        }
+
         crate::logln!(
             "  {} {} {}",
             style("create").green().bold(),
@@ -538,16 +544,27 @@ fn ensure_missing_repos(
             style(format!("on {}", endpoint.label())).dim()
         );
 
-        let site = context.config.site(&endpoint.site).unwrap();
         let client = ProviderClient::new(site)?;
-        let created = client
-            .create_repo(
-                &endpoint,
-                repo_name,
-                &create_visibility,
-                description.as_deref(),
-            )
-            .with_context(|| format!("failed to create {} on {}", repo_name, endpoint.label()))?;
+        let created = match client.create_repo(
+            &endpoint,
+            repo_name,
+            &create_visibility,
+            description.as_deref(),
+        ) {
+            Ok(created) => created,
+            Err(error)
+                if site.provider == ProviderKind::Gitlab
+                    && is_gitlab_invalid_project_name_error(&error) =>
+            {
+                log_invalid_gitlab_project_name_skip(repo_name, &endpoint);
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create {} on {}", repo_name, endpoint.label())
+                });
+            }
+        };
         if created.private != expected_private {
             crate::logln!(
                 "  {} created {} on {}, but provider reported a different visibility than requested",
@@ -556,14 +573,15 @@ fn ensure_missing_repos(
                 style(endpoint.label()).dim()
             );
         }
-        Ok((
+        Ok(Some((
             index,
             EndpointRepo {
                 endpoint,
                 repo: created,
             },
-        ))
+        )))
     })?;
+    let mut created = created.into_iter().flatten().collect::<Vec<_>>();
     created.sort_by_key(|(index, _)| *index);
     let created = created
         .into_iter()
@@ -584,6 +602,50 @@ fn visibility_for_created_repo(mirror: &MirrorConfig, template: Option<&RemoteRe
             }
         })
         .unwrap_or_else(|| mirror.visibility.clone())
+}
+
+fn is_supported_gitlab_project_path(name: &str) -> bool {
+    if name.is_empty()
+        || matches!(name.chars().next(), Some('-' | '_' | '.'))
+        || matches!(name.chars().last(), Some('-' | '_' | '.'))
+    {
+        return false;
+    }
+
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".git") || lower.ends_with(".atom") {
+        return false;
+    }
+
+    name.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+fn log_invalid_gitlab_project_name_skip(repo_name: &str, endpoint: &EndpointConfig) {
+    crate::logln!(
+        "  {} {} {}",
+        style("skip").yellow().bold(),
+        style(repo_name).cyan(),
+        style(format!(
+            "on {}: invalid GitLab project name/path",
+            endpoint.label()
+        ))
+        .dim()
+    );
+}
+
+fn is_gitlab_invalid_project_name_error(error: &anyhow::Error) -> bool {
+    let text = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    text.contains("400 bad request")
+        && (text.contains("project_namespace.path")
+            || text.contains("can only include non-accented letters")
+            || text.contains("must not start with")
+            || text.contains("must start with a letter"))
 }
 
 struct RepoSyncContext<'a> {

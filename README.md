@@ -12,13 +12,15 @@ Created becasue github is so unusable and [unreliable](https://red-squares.cian.
 - **read-write mirrors**: Make changes from any provider, and the changes will sync to the others
 - **webhook support**: Sync right after push, reduce potential divergence window
 - **conflict handling**: Rebase or open pull requests when two platforms diverge
-- **tracks deletions**: Delete branches/repos across platforms when they are deleted from one platform
+- **tracks deletions**: Branches/repo deletions sync across platforms (with backup) 
 - **selective sync**: Sync subset of repos by regex white/black list, or by private/public visibility
+- **multithreaded**: Process multiple repos simultaneously!
 
 Supported platforms: GitHub, GitLab, Gitea, Forgejo
 
 > [!NOTE]
-> Meow
+> My cat made this codebase, meow
+
 
 ## Install
 
@@ -177,6 +179,10 @@ To move installed hooks to a new public URL, use `webhook update`. It removes ho
 refray webhook update https://new.example.com/webhook
 ```
 
+## Issues and Pull Requests
+
+Issues and pull requests are not mirrored.
+
 ## Sync Semantics
 
 Each mirror group is treated as a set of equivalent namespaces. Repositories are matched by repository name across all endpoints.
@@ -245,6 +251,3 @@ REFRAY_E2E_ALLOW_DESTRUCTIVE=1 \
 
 By default cleanup only deletes repositories named `refray-e2e-*`. To start by deleting every owned repository visible to the configured accounts, set `REFRAY_E2E_CLEAR_ALL_REPOS=DELETE_ALL_OWNED_REPOS`. Provider skips (`REFRAY_E2E_SKIP_GITHUB`, `REFRAY_E2E_SKIP_GITLAB`, `REFRAY_E2E_SKIP_GITEA`, `REFRAY_E2E_SKIP_FORGEJO`) and `REFRAY_E2E_ALLOW_PARTIAL=1` are available for local debugging, but the full support check should run with all four providers.
 
-## Issues and Pull Requests
-
-Issues and pull requests are not mirrored.

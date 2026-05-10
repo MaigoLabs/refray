@@ -532,6 +532,39 @@ fn created_repo_visibility_falls_back_to_config_without_template() {
     );
 }
 
+#[test]
+fn gitlab_invalid_project_name_errors_are_skippable() {
+    let error = anyhow::Error::msg(
+        r#"POST https://gitlab.com/api/v4/projects returned 400 Bad Request: {"message":{"project_namespace.path":["can only include non-accented letters, digits, '_', '-' and '.'. It must not start with '-', '_', or '.'."],"name":["can contain only letters, digits, emoji, '_', '.', '+', dashes, or spaces. It must start with a letter, digit, emoji, or '_'."]}}"#,
+    );
+
+    assert!(is_gitlab_invalid_project_name_error(&error));
+}
+
+#[test]
+fn gitlab_project_path_validation_matches_create_constraints() {
+    for name in ["Kairos", "needLe", "amaoke.app", "repo_1", "repo-1"] {
+        assert!(is_supported_gitlab_project_path(name), "{name}");
+    }
+
+    for name in [
+        "",
+        ".github",
+        "_private",
+        "-draft",
+        "repo.",
+        "repo_",
+        "repo-",
+        "repo.git",
+        "repo.atom",
+        "has space",
+        "has+plus",
+        "荞麦main",
+    ] {
+        assert!(!is_supported_gitlab_project_path(name), "{name}");
+    }
+}
+
 fn remote_ref_state(hash: &str, branches: &[(&str, &str)]) -> RemoteRefState {
     RemoteRefState {
         hash: hash.to_string(),
