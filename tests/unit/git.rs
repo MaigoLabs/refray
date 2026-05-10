@@ -42,6 +42,19 @@ fn detects_provider_disabled_repository_errors() {
 }
 
 #[test]
+fn detects_missing_repository_errors() {
+    let error: anyhow::Error = GitCommandError::new(
+        "git ls-remote",
+        "",
+        "remote: Repository not found.\nfatal: repository 'https://github.com/alice/missing.git/' not found",
+    )
+    .into();
+
+    assert!(is_missing_repository_error(&error));
+    assert!(!is_disabled_repository_error(&error));
+}
+
+#[test]
 fn ls_remote_snapshot_changes_when_remote_refs_change() {
     let fixture = GitFixture::new();
     fixture.commit("base", "base", 1_700_000_000);

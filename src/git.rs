@@ -816,6 +816,13 @@ pub fn is_disabled_repository_error(error: &anyhow::Error) -> bool {
         .any(|error| is_disabled_repository_stderr(error.stderr()))
 }
 
+pub fn is_missing_repository_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<GitCommandError>())
+        .any(|error| is_missing_repository_stderr(error.stderr()))
+}
+
 fn missing_remotes(all_remote_names: &[String], source_remotes: &[String]) -> Vec<String> {
     all_remote_names
         .iter()
@@ -830,6 +837,14 @@ fn is_disabled_repository_stderr(stderr: &str) -> bool {
         || stderr.contains("repository has been disabled")
         || stderr.contains("disabled by github staff")
         || stderr.contains("dmca takedown")
+}
+
+fn is_missing_repository_stderr(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    (stderr.contains("repository") && stderr.contains("not found"))
+        || stderr.contains("project you were looking for could not be found")
+        || stderr.contains("does not appear to be a git repository")
+        || stderr.contains("the requested url returned error: 404")
 }
 
 impl Redactor {

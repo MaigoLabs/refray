@@ -8,7 +8,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use console::style;
 use hmac::{Hmac, KeyInit, Mac};
-use regex::escape;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -22,7 +21,7 @@ use crate::provider::{
     EndpointRepo, ProviderClient, RemoteRepo, WebhookInstallOutcome, list_mirror_repos,
 };
 use crate::state::{load_toml_or_default, save_toml};
-use crate::sync::{SyncOptions, sync_all};
+use crate::sync::{SyncOptions, sync_all, sync_webhook_repo};
 
 type HmacSha256 = Hmac<Sha256>;
 const WEBHOOK_STATE_FILE: &str = "webhook-state.toml";
@@ -153,6 +152,7 @@ fn full_sync_timer_loop(
             &config,
             SyncOptions {
                 work_dir: work_dir.clone(),
+                jobs: config.jobs,
                 ..SyncOptions::default()
             },
         ) {
@@ -377,15 +377,12 @@ fn worker_loop(
         let _sync_guard = sync_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let result = sync_all(
+        let result = sync_webhook_repo(
             &config,
-            SyncOptions {
-                group: Some(job.group.clone()),
-                repo_pattern: Some(format!("^{}$", escape(&job.repo))),
-                work_dir: work_dir.clone(),
-                jobs: 1,
-                ..SyncOptions::default()
-            },
+            &job.group,
+            &job.repo,
+            work_dir.clone(),
+            config.jobs,
         );
         match result {
             Ok(()) => crate::logln!(

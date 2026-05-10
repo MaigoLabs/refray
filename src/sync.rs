@@ -15,7 +15,7 @@ use crate::config::{
 };
 use crate::git::{
     BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RefBackup, RemoteSpec,
-    is_disabled_repository_error, ls_remote_refs, safe_remote_name,
+    is_disabled_repository_error, is_missing_repository_error, ls_remote_refs, safe_remote_name,
 };
 use crate::logging;
 use crate::provider::{
@@ -137,6 +137,83 @@ pub fn sync_all(config: &Config, options: SyncOptions) -> Result<()> {
         bail!("sync completed with {} failure(s)", failures.len());
     }
 
+    Ok(())
+}
+
+pub fn sync_webhook_repo(
+    config: &Config,
+    group: &str,
+    repo_name: &str,
+    work_dir: Option<PathBuf>,
+    jobs: usize,
+) -> Result<()> {
+    validate_config(config)?;
+    if jobs == 0 {
+        bail!("jobs must be at least 1");
+    }
+    let work_dir = work_dir.unwrap_or_else(default_work_dir);
+    fs::create_dir_all(&work_dir)
+        .with_context(|| format!("failed to create {}", work_dir.display()))?;
+    let mirror = config
+        .mirrors
+        .iter()
+        .find(|mirror| mirror.name == group)
+        .with_context(|| format!("no mirror group matched '{group}'"))?;
+    let repo_filter = mirror.repo_filter()?;
+    if !repo_filter.matches(repo_name) {
+        crate::logln!(
+            "  {} {} does not match configured repository filters",
+            style("skip").yellow().bold(),
+            style(repo_name).cyan()
+        );
+        return Ok(());
+    }
+
+    let tokens = config
+        .sites
+        .iter()
+        .map(|site| site.token())
+        .collect::<Result<Vec<_>>>()?;
+    let redactor = Redactor::new(tokens);
+    let mut ref_state = load_ref_state(&work_dir)?;
+    crate::logln!();
+    crate::logln!(
+        "{} {}",
+        style("Mirror group").cyan().bold(),
+        style(&mirror.name).bold()
+    );
+    let mut repos = targeted_endpoint_repos(config, mirror, repo_name)?;
+    let context = RepoSyncContext {
+        config,
+        mirror,
+        work_dir: &work_dir,
+        redactor,
+        dry_run: false,
+        jobs,
+    };
+    let outcome = sync_assumed_repo(
+        &context,
+        repo_name,
+        &mut repos,
+        mirror.create_missing,
+        &ref_state,
+    )?;
+    if !outcome.created_repos.is_empty() {
+        webhook::ensure_configured_webhooks(
+            config,
+            mirror,
+            &outcome.created_repos,
+            &work_dir,
+            jobs,
+        )?;
+    }
+    if let Some(update) = outcome.state_update {
+        match update {
+            RepoStateUpdate::Set(refs) => ref_state.set_repo(&mirror.name, repo_name, refs),
+            RepoStateUpdate::Remove => ref_state.remove_repo(&mirror.name, repo_name),
+        }
+        save_ref_state(&work_dir, &ref_state)?;
+    }
     Ok(())
 }
 
@@ -413,7 +490,7 @@ fn ensure_missing_repos(
     repo_name: &str,
     existing: &mut Vec<EndpointRepo>,
     create_missing: bool,
-) -> Result<()> {
+) -> Result<Vec<EndpointRepo>> {
     let present = existing
         .iter()
         .map(|repo| repo.endpoint.clone())
@@ -447,7 +524,7 @@ fn ensure_missing_repos(
                 style(format!("on {}", endpoint.label())).dim()
             );
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let description = template.and_then(|repo| repo.description);
@@ -488,9 +565,13 @@ fn ensure_missing_repos(
         ))
     })?;
     created.sort_by_key(|(index, _)| *index);
-    existing.extend(created.into_iter().map(|(_, repo)| repo));
+    let created = created
+        .into_iter()
+        .map(|(_, repo)| repo)
+        .collect::<Vec<_>>();
+    existing.extend(created.clone());
 
-    Ok(())
+    Ok(created)
 }
 
 fn visibility_for_created_repo(mirror: &MirrorConfig, template: Option<&RemoteRepo>) -> Visibility {
@@ -517,6 +598,7 @@ struct RepoSyncContext<'a> {
 #[derive(Default)]
 struct RepoSyncOutcome {
     state_update: Option<RepoStateUpdate>,
+    created_repos: Vec<EndpointRepo>,
 }
 
 enum RepoStateUpdate {
@@ -529,6 +611,46 @@ fn mirror_repo_path(context: &RepoSyncContext<'_>, repo_name: &str) -> PathBuf {
         .work_dir
         .join(safe_remote_name(&context.mirror.name))
         .join(format!("{}.git", safe_remote_name(repo_name)))
+}
+
+fn targeted_endpoint_repos(
+    config: &Config,
+    mirror: &MirrorConfig,
+    repo_name: &str,
+) -> Result<Vec<EndpointRepo>> {
+    mirror
+        .endpoints
+        .iter()
+        .map(|endpoint| {
+            let site = config.site(&endpoint.site).unwrap();
+            Ok(EndpointRepo {
+                endpoint: endpoint.clone(),
+                repo: RemoteRepo {
+                    name: repo_name.to_string(),
+                    clone_url: endpoint_clone_url(site, endpoint, repo_name)?,
+                    private: matches!(mirror.visibility, Visibility::Private),
+                    description: None,
+                },
+            })
+        })
+        .collect()
+}
+
+fn endpoint_clone_url(
+    site: &crate::config::SiteConfig,
+    endpoint: &EndpointConfig,
+    repo_name: &str,
+) -> Result<String> {
+    let mut url = url::Url::parse(&site.base_url)
+        .with_context(|| format!("invalid base URL for site '{}'", site.name))?;
+    let base_path = url.path().trim_end_matches('/');
+    let repo_path = format!("{}/{}.git", endpoint.namespace.trim_matches('/'), repo_name);
+    if base_path.is_empty() {
+        url.set_path(&repo_path);
+    } else {
+        url.set_path(&format!("{base_path}/{repo_path}"));
+    }
+    Ok(url.to_string())
 }
 
 fn sync_repo(
@@ -608,7 +730,7 @@ fn sync_repo(
         }
     }
 
-    ensure_missing_repos(context, repo_name, repos, create_missing)?;
+    let created_repos = ensure_missing_repos(context, repo_name, repos, create_missing)?;
 
     if repos.len() < 2 {
         crate::logln!(
@@ -664,9 +786,143 @@ fn sync_repo(
         };
         return Ok(RepoSyncOutcome {
             state_update: Some(RepoStateUpdate::Set(refs)),
+            created_repos,
         });
     }
-    Ok(RepoSyncOutcome::default())
+    Ok(RepoSyncOutcome {
+        created_repos,
+        ..RepoSyncOutcome::default()
+    })
+}
+
+fn sync_assumed_repo(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    repos: &mut [EndpointRepo],
+    create_missing: bool,
+    ref_state: &RefState,
+) -> Result<RepoSyncOutcome> {
+    crate::logln!();
+    crate::logln!(
+        "{} {}",
+        style("Repo").magenta().bold(),
+        style(repo_name).bold()
+    );
+    let previous_repo_refs = ref_state.repo(&context.mirror.name, repo_name);
+    let all_remotes = remote_specs(context, repos)?;
+    let Some(initial_ref_check) = check_assumed_remote_refs(context, repo_name, &all_remotes)?
+    else {
+        return Ok(RepoSyncOutcome::default());
+    };
+    if initial_ref_check.refs.is_empty() {
+        crate::logln!(
+            "  {} {}",
+            style("skip").yellow().bold(),
+            style("repository not found on any endpoint").dim()
+        );
+        return Ok(RepoSyncOutcome::default());
+    }
+
+    let existing_remote_names = initial_ref_check
+        .refs
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut existing_repos = repos
+        .iter()
+        .filter(|repo| existing_remote_names.contains(&remote_name_for_endpoint_repo(repo)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let existing_remotes = all_remotes
+        .iter()
+        .filter(|remote| existing_remote_names.contains(&remote.name))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let path = mirror_repo_path(context, repo_name);
+    let mirror_repo = GitMirror::open(path, context.redactor.clone(), context.dry_run)?;
+    mirror_repo.configure_remotes(&all_remotes)?;
+    let cached_ref_state = cached_ref_state(&mirror_repo, &existing_remotes)?;
+    backup_branches_deleted_everywhere(
+        context,
+        &mirror_repo,
+        repo_name,
+        detailed_repo_ref_state(previous_repo_refs).or(cached_ref_state.as_ref()),
+        &initial_ref_check.refs,
+    )?;
+
+    for remote in &existing_remotes {
+        if let Err(error) = mirror_repo.fetch_remote(remote) {
+            if is_disabled_repository_error(&error) {
+                crate::logln!(
+                    "  {} {} {}",
+                    style("skip").yellow().bold(),
+                    style(repo_name).cyan(),
+                    style(format!("provider blocked access on {}", remote.display)).dim()
+                );
+                return Ok(RepoSyncOutcome::default());
+            }
+            if is_missing_repository_error(&error) {
+                crate::logln!(
+                    "  {} {} {}",
+                    style("missing").yellow().bold(),
+                    style(repo_name).cyan(),
+                    style(format!("on {}", remote.display)).dim()
+                );
+                existing_repos.retain(|repo| remote_name_for_endpoint_repo(repo) != remote.name);
+                continue;
+            }
+            return Err(error).with_context(|| format!("failed to fetch {}", remote.display));
+        }
+    }
+
+    let created_repos =
+        ensure_missing_repos(context, repo_name, &mut existing_repos, create_missing)?;
+    if existing_repos.len() < 2 {
+        crate::logln!(
+            "  {} {} {}",
+            style("skip").yellow().bold(),
+            style(repo_name).cyan(),
+            style("fewer than two endpoints have this repository").dim()
+        );
+        return Ok(RepoSyncOutcome {
+            created_repos,
+            ..RepoSyncOutcome::default()
+        });
+    }
+
+    let remotes = remote_specs(context, &existing_repos)?;
+    mirror_repo.configure_remotes(&remotes)?;
+    let result = push_repo_refs(
+        context,
+        &mirror_repo,
+        repo_name,
+        &remotes,
+        &existing_repos,
+        detailed_repo_ref_state(previous_repo_refs).or(cached_ref_state.as_ref()),
+        &initial_ref_check.refs,
+    )?;
+    if !context.dry_run && !result.had_conflicts {
+        let refs = if result.pushed {
+            let Some(refs) = check_remote_refs(context, repo_name, &remotes)? else {
+                return Ok(RepoSyncOutcome {
+                    created_repos,
+                    ..RepoSyncOutcome::default()
+                });
+            };
+            refs
+        } else {
+            initial_ref_check.refs
+        };
+        return Ok(RepoSyncOutcome {
+            state_update: Some(RepoStateUpdate::Set(refs)),
+            created_repos,
+        });
+    }
+    Ok(RepoSyncOutcome {
+        created_repos,
+        ..RepoSyncOutcome::default()
+    })
 }
 
 fn handle_repo_deletion(
@@ -698,6 +954,7 @@ fn handle_repo_deletion(
             backup_deleted_repo(context, repo_name, repos, previous_refs, current_refs)?;
             Ok(Some(RepoSyncOutcome {
                 state_update: (!context.dry_run).then_some(RepoStateUpdate::Remove),
+                ..RepoSyncOutcome::default()
             }))
         }
         RepoDeletionDecision::Propagate {
@@ -715,6 +972,7 @@ fn handle_repo_deletion(
             delete_repos(context, repo_name, repos, &target_remotes)?;
             Ok(Some(RepoSyncOutcome {
                 state_update: (!context.dry_run).then_some(RepoStateUpdate::Remove),
+                ..RepoSyncOutcome::default()
             }))
         }
         RepoDeletionDecision::Conflict {
@@ -918,6 +1176,69 @@ fn check_remote_refs(
         }
     }
     Ok(Some(refs))
+}
+
+struct AssumedRemoteRefState {
+    refs: BTreeMap<String, RemoteRefState>,
+}
+
+fn check_assumed_remote_refs(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    remotes: &[RemoteSpec],
+) -> Result<Option<AssumedRemoteRefState>> {
+    enum RemoteRefCheck {
+        Found(String, RemoteRefState),
+        Missing(String),
+        Blocked,
+    }
+
+    let ref_jobs = remotes.to_vec();
+    let results = crate::parallel::map(ref_jobs, context.jobs, |remote| {
+        crate::logln!(
+            "  {} {}",
+            style("probe refs").cyan().bold(),
+            style(&remote.display).dim()
+        );
+        match ls_remote_refs(&remote, &context.redactor) {
+            Ok(snapshot) => Ok(RemoteRefCheck::Found(remote.name, snapshot.into())),
+            Err(error) if is_missing_repository_error(&error) => {
+                crate::logln!(
+                    "  {} {} {}",
+                    style("missing").yellow().bold(),
+                    style(repo_name).cyan(),
+                    style(format!("on {}", remote.display)).dim()
+                );
+                Ok(RemoteRefCheck::Missing(remote.name))
+            }
+            Err(error) if is_disabled_repository_error(&error) => {
+                crate::logln!(
+                    "  {} {} {}",
+                    style("skip").yellow().bold(),
+                    style(repo_name).cyan(),
+                    style(format!("provider blocked access on {}", remote.display)).dim()
+                );
+                Ok(RemoteRefCheck::Blocked)
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to check refs for {}", remote.display))
+            }
+        }
+    })?;
+
+    let mut refs = BTreeMap::new();
+    for result in results {
+        match result {
+            RemoteRefCheck::Found(remote, refs_for_remote) => {
+                refs.insert(remote, refs_for_remote);
+            }
+            RemoteRefCheck::Missing(remote) => {
+                let _ = remote;
+            }
+            RemoteRefCheck::Blocked => return Ok(None),
+        }
+    }
+    Ok(Some(AssumedRemoteRefState { refs }))
 }
 
 fn remote_specs(context: &RepoSyncContext<'_>, repos: &[EndpointRepo]) -> Result<Vec<RemoteSpec>> {

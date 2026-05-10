@@ -449,6 +449,46 @@ fn endpoint_remote_names_do_not_slug_collide() {
 }
 
 #[test]
+fn targeted_endpoint_repos_synthesize_clone_urls_without_listing() {
+    let mirror = MirrorConfig {
+        name: "sync-1".to_string(),
+        endpoints: vec![EndpointConfig {
+            site: "gitlab".to_string(),
+            kind: crate::config::NamespaceKind::Group,
+            namespace: "parent/child".to_string(),
+        }],
+        sync_visibility: crate::config::SyncVisibility::All,
+        repo_whitelist: None,
+        repo_blacklist: None,
+        create_missing: true,
+        delete_missing: true,
+        visibility: crate::config::Visibility::Private,
+        conflict_resolution: ConflictResolutionStrategy::Fail,
+    };
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![crate::config::SiteConfig {
+            name: "gitlab".to_string(),
+            provider: crate::config::ProviderKind::Gitlab,
+            base_url: "https://gitlab.example.test/root".to_string(),
+            api_url: None,
+            token: crate::config::TokenConfig::Value("token".to_string()),
+            git_username: None,
+        }],
+        mirrors: vec![mirror.clone()],
+        webhook: None,
+    };
+
+    let repos = targeted_endpoint_repos(&config, &mirror, "repo").unwrap();
+
+    assert_eq!(repos.len(), 1);
+    assert_eq!(
+        repos[0].repo.clone_url,
+        "https://gitlab.example.test/root/parent/child/repo.git"
+    );
+}
+
+#[test]
 fn created_repo_visibility_follows_existing_public_repo() {
     let mirror = test_mirror();
     let repo = crate::provider::RemoteRepo {
