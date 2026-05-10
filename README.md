@@ -1,5 +1,9 @@
 # refray
 
+<center>
+  <img src="./docs/refray.png" alt="refray logo" width="200"/>
+</center>
+
 A tool to keep your repos in sync across all git platforms, while being able to work from everywhere all at once. 
 
 Created becasue github is so unusable and [unreliable](https://red-squares.cian.lol/) and I want to leave, but I don't want to leave the community behind.
