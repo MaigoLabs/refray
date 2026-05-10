@@ -38,6 +38,8 @@ fn sequential_live_e2e_all_supported_features() -> Result<()> {
     run.creation_branch_tag_and_read_write_sync()?;
     eprintln!("e2e phase: dry-run/no-create");
     run.dry_run_and_no_create_do_not_write()?;
+    eprintln!("e2e phase: visibility sync");
+    run.repository_visibility_is_mirrored()?;
     eprintln!("e2e phase: retry failed");
     run.failed_sync_can_retry_only_failed_repo()?;
     eprintln!("e2e phase: auto rebase");
@@ -427,6 +429,26 @@ namespace = "{}"
         Ok(())
     }
 
+    fn repository_visibility_is_mirrored(&self) -> Result<()> {
+        let source = self.primary_provider();
+
+        let public_repo = self.repo_name("visibility-public");
+        source.create_repo_with_visibility(&public_repo, false)?;
+        self.seed_main(source, &public_repo, "visibility public", 1_700_000_251)?;
+        self.set_mirror_visibility("private")?;
+        self.sync_repo(&public_repo, [])?;
+        self.assert_repo_visibility_all(&public_repo, false)?;
+
+        let private_repo = self.repo_name("visibility-private");
+        source.create_repo_with_visibility(&private_repo, true)?;
+        self.seed_main(source, &private_repo, "visibility private", 1_700_000_252)?;
+        self.set_mirror_visibility("public")?;
+        self.sync_repo(&private_repo, [])?;
+        self.assert_repo_visibility_all(&private_repo, true)?;
+
+        Ok(())
+    }
+
     fn failed_sync_can_retry_only_failed_repo(&self) -> Result<()> {
         let repo = self.repo_name("retry");
         let (source, peer) = self.provider_pair();
@@ -790,6 +812,33 @@ namespace = "{}"
             .with_context(|| format!("failed to write {}", self.config_path.display()))
     }
 
+    fn set_mirror_visibility(&self, visibility: &str) -> Result<()> {
+        let contents = fs::read_to_string(&self.config_path)
+            .with_context(|| format!("failed to read {}", self.config_path.display()))?;
+        let replacement = format!("visibility = \"{visibility}\"");
+        let mut replaced = false;
+        let mut updated = contents
+            .lines()
+            .map(|line| {
+                if line.starts_with("visibility = ") {
+                    replaced = true;
+                    replacement.clone()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if contents.ends_with('\n') {
+            updated.push('\n');
+        }
+        if !replaced {
+            bail!("config is missing mirror visibility");
+        }
+        fs::write(&self.config_path, updated)
+            .with_context(|| format!("failed to write {}", self.config_path.display()))
+    }
+
     fn set_webhook_url(&self, url: &str) -> Result<()> {
         let contents = fs::read_to_string(&self.config_path)
             .with_context(|| format!("failed to read {}", self.config_path.display()))?;
@@ -961,6 +1010,21 @@ namespace = "{}"
             }
         }
         Ok(())
+    }
+
+    fn assert_repo_visibility_all(&self, repo: &str, private: bool) -> Result<()> {
+        retry("repo visibility", || {
+            for provider in &self.settings.providers {
+                let actual = provider.repo_private(repo)?;
+                if actual != private {
+                    bail!(
+                        "expected {repo} private={private} on {}, got private={actual}",
+                        provider.site_name
+                    );
+                }
+            }
+            Ok(())
+        })
     }
 
     fn assert_branch_all_equal(&self, repo: &str, branch: &str) -> Result<()> {
@@ -1274,6 +1338,29 @@ impl ProviderAccount {
         }
     }
 
+    fn repo_private(&self, repo: &str) -> Result<bool> {
+        let url = self.repo_api_url(repo);
+        let response = self.auth(self.http.get(url.clone())).send()?;
+        if !response.status().is_success() {
+            check_response("GET", &url, response)?;
+            unreachable!("check_response returns Err for unsuccessful responses")
+        }
+        let value: Value = response
+            .json()
+            .with_context(|| format!("invalid JSON from {url}"))?;
+        match self.kind {
+            ProviderKind::Github | ProviderKind::Gitea | ProviderKind::Forgejo => value
+                .get("private")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("{} repo response missing private", self.site_name)),
+            ProviderKind::Gitlab => value
+                .get("visibility")
+                .and_then(Value::as_str)
+                .map(|visibility| visibility != "public")
+                .ok_or_else(|| anyhow!("{} repo response missing visibility", self.site_name)),
+        }
+    }
+
     fn wait_repo_present(&self, repo: &str) -> Result<()> {
         retry("repo present", || {
             if self.repo_exists(repo)? {
@@ -1329,15 +1416,23 @@ impl ProviderAccount {
     }
 
     fn create_repo(&self, name: &str) -> Result<()> {
+        self.create_repo_with_visibility(name, false)
+    }
+
+    fn create_repo_with_visibility(&self, name: &str, private: bool) -> Result<()> {
         if self.repo_exists(name)? {
             self.wait_repo_listed(name)?;
             return Ok(());
         }
         let body = match self.kind {
-            ProviderKind::Github => json!({ "name": name, "private": false, "auto_init": false }),
-            ProviderKind::Gitlab => json!({ "name": name, "path": name, "visibility": "public" }),
+            ProviderKind::Github => json!({ "name": name, "private": private, "auto_init": false }),
+            ProviderKind::Gitlab => json!({
+                "name": name,
+                "path": name,
+                "visibility": if private { "private" } else { "public" },
+            }),
             ProviderKind::Gitea | ProviderKind::Forgejo => {
-                json!({ "name": name, "private": false, "auto_init": false })
+                json!({ "name": name, "private": private, "auto_init": false })
             }
         };
         let url = match self.kind {

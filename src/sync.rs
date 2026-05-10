@@ -10,7 +10,7 @@ use regex::Regex;
 
 use crate::config::{
     Config, ConflictResolutionStrategy, DEFAULT_JOBS, EndpointConfig, MirrorConfig, NamespaceKind,
-    RepoNameFilter, SyncVisibility, default_work_dir, validate_config,
+    RepoNameFilter, SyncVisibility, Visibility, default_work_dir, validate_config,
 };
 use crate::git::{
     BranchConflict, BranchDeletion, BranchUpdate, GitMirror, Redactor, RemoteSpec,
@@ -18,7 +18,7 @@ use crate::git::{
 };
 use crate::logging;
 use crate::provider::{
-    EndpointRepo, ProviderClient, PullRequestRequest, list_mirror_repos, repos_by_name,
+    EndpointRepo, ProviderClient, PullRequestRequest, RemoteRepo, list_mirror_repos, repos_by_name,
 };
 use crate::webhook;
 
@@ -425,6 +425,7 @@ fn ensure_missing_repos(
         .filter(|endpoint| !present.contains(*endpoint))
         .cloned()
         .collect::<Vec<_>>();
+    let create_visibility = visibility_for_created_repo(context.mirror, template.as_ref());
 
     if !create_missing || context.dry_run {
         for endpoint in &missing {
@@ -449,10 +450,7 @@ fn ensure_missing_repos(
     }
 
     let description = template.and_then(|repo| repo.description);
-    let expected_private = matches!(
-        &context.mirror.visibility,
-        crate::config::Visibility::Private
-    );
+    let expected_private = matches!(create_visibility, Visibility::Private);
     let create_jobs = missing.into_iter().enumerate().collect::<Vec<_>>();
     let mut created = crate::parallel::map(create_jobs, context.jobs, |(index, endpoint)| {
         crate::logln!(
@@ -468,7 +466,7 @@ fn ensure_missing_repos(
             .create_repo(
                 &endpoint,
                 repo_name,
-                &context.mirror.visibility,
+                &create_visibility,
                 description.as_deref(),
             )
             .with_context(|| format!("failed to create {} on {}", repo_name, endpoint.label()))?;
@@ -492,6 +490,18 @@ fn ensure_missing_repos(
     existing.extend(created.into_iter().map(|(_, repo)| repo));
 
     Ok(())
+}
+
+fn visibility_for_created_repo(mirror: &MirrorConfig, template: Option<&RemoteRepo>) -> Visibility {
+    template
+        .map(|repo| {
+            if repo.private {
+                Visibility::Private
+            } else {
+                Visibility::Public
+            }
+        })
+        .unwrap_or_else(|| mirror.visibility.clone())
 }
 
 struct RepoSyncContext<'a> {
