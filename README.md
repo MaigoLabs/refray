@@ -210,7 +210,7 @@ refray webhook update https://new.example.com/webhook
 
 Issues and pull requests are not mirrored.
 
-## Sync Semantics
+<!-- ## Sync Semantics
 
 Each mirror group is treated as a set of equivalent namespaces. Repositories are matched by repository name across all endpoints.
 
@@ -276,4 +276,4 @@ REFRAY_E2E_ALLOW_DESTRUCTIVE=1 \
   cargo test --test sequential -- --ignored --test-threads=1 --nocapture
 ```
 
-By default cleanup only deletes repositories named `refray-e2e-*`. To start by deleting every owned repository visible to the configured accounts, set `REFRAY_E2E_CLEAR_ALL_REPOS=DELETE_ALL_OWNED_REPOS`. Provider skips (`REFRAY_E2E_SKIP_GITHUB`, `REFRAY_E2E_SKIP_GITLAB`, `REFRAY_E2E_SKIP_GITEA`, `REFRAY_E2E_SKIP_FORGEJO`) and `REFRAY_E2E_ALLOW_PARTIAL=1` are available for local debugging, but the full support check should run with all four providers.
+By default cleanup only deletes repositories named `refray-e2e-*`. To start by deleting every owned repository visible to the configured accounts, set `REFRAY_E2E_CLEAR_ALL_REPOS=DELETE_ALL_OWNED_REPOS`. Provider skips (`REFRAY_E2E_SKIP_GITHUB`, `REFRAY_E2E_SKIP_GITLAB`, `REFRAY_E2E_SKIP_GITEA`, `REFRAY_E2E_SKIP_FORGEJO`) and `REFRAY_E2E_ALLOW_PARTIAL=1` are available for local debugging, but the full support check should run with all four providers. -->
