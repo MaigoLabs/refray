@@ -56,10 +56,10 @@ pub struct MirrorConfig {
     pub endpoints: Vec<EndpointConfig>,
     #[serde(default)]
     pub sync_visibility: SyncVisibility,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub repo_whitelist: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub repo_blacklist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_whitelist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_blacklist: Option<String>,
     #[serde(default = "default_true")]
     pub create_missing: bool,
     #[serde(default)]
@@ -135,8 +135,8 @@ pub enum SyncVisibility {
 
 #[derive(Clone, Debug)]
 pub struct RepoNameFilter {
-    whitelist: Vec<Regex>,
-    blacklist: Vec<Regex>,
+    whitelist: Option<Regex>,
+    blacklist: Option<Regex>,
 }
 
 impl SyncVisibility {
@@ -152,35 +152,41 @@ impl SyncVisibility {
 impl MirrorConfig {
     pub fn repo_filter(&self) -> Result<RepoNameFilter> {
         Ok(RepoNameFilter {
-            whitelist: compile_repo_patterns(&self.name, "repo_whitelist", &self.repo_whitelist)?,
-            blacklist: compile_repo_patterns(&self.name, "repo_blacklist", &self.repo_blacklist)?,
+            whitelist: compile_repo_pattern(&self.name, "repo_whitelist", &self.repo_whitelist)?,
+            blacklist: compile_repo_pattern(&self.name, "repo_blacklist", &self.repo_blacklist)?,
         })
     }
 }
 
 impl RepoNameFilter {
     pub fn matches(&self, repo_name: &str) -> bool {
-        let whitelisted = self.whitelist.is_empty()
-            || self
-                .whitelist
-                .iter()
-                .any(|pattern| pattern.is_match(repo_name));
+        let whitelisted = self
+            .whitelist
+            .as_ref()
+            .is_none_or(|pattern| pattern.is_match(repo_name));
         let blacklisted = self
             .blacklist
-            .iter()
-            .any(|pattern| pattern.is_match(repo_name));
+            .as_ref()
+            .is_some_and(|pattern| pattern.is_match(repo_name));
         whitelisted && !blacklisted
     }
 }
 
-fn compile_repo_patterns(mirror: &str, field: &str, patterns: &[String]) -> Result<Vec<Regex>> {
-    patterns
-        .iter()
-        .map(|pattern| {
-            Regex::new(pattern)
-                .with_context(|| format!("mirror '{mirror}' has invalid {field} regex '{pattern}'"))
-        })
-        .collect()
+fn compile_repo_pattern(
+    mirror: &str,
+    field: &str,
+    pattern: &Option<String>,
+) -> Result<Option<Regex>> {
+    let Some(pattern) = pattern
+        .as_deref()
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+    else {
+        return Ok(None);
+    };
+    Regex::new(pattern)
+        .with_context(|| format!("mirror '{mirror}' has invalid {field} regex '{pattern}'"))
+        .map(Some)
 }
 
 fn default_true() -> bool {

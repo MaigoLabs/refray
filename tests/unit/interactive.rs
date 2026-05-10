@@ -211,8 +211,8 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
                 },
             ],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -240,8 +240,8 @@ fn wizard_can_ask_to_run_full_sync_after_config() {
             name: "sync-1".to_string(),
             endpoints: Vec::new(),
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -316,8 +316,8 @@ fn wizard_edits_existing_sync_group_from_menu() {
                 },
             ],
             sync_visibility: SyncVisibility::Private,
-            repo_whitelist: vec!["^important-".to_string()],
-            repo_blacklist: vec!["-archive$".to_string()],
+            repo_whitelist: Some("^important-".to_string()),
+            repo_blacklist: Some("-archive$".to_string()),
             create_missing: false,
             visibility: Visibility::Public,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -357,8 +357,8 @@ fn wizard_edits_existing_sync_group_from_menu() {
     assert_eq!(mirror.endpoints[1].namespace, "bob");
     assert!(!mirror.create_missing);
     assert_eq!(mirror.sync_visibility, SyncVisibility::Public);
-    assert_eq!(mirror.repo_whitelist, vec!["^public-".to_string()]);
-    assert_eq!(mirror.repo_blacklist, vec!["-skip$".to_string()]);
+    assert_eq!(mirror.repo_whitelist, Some("^public-".to_string()));
+    assert_eq!(mirror.repo_blacklist, Some("-skip$".to_string()));
     assert_eq!(mirror.visibility, Visibility::Public);
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("Edit sync group"));
@@ -403,8 +403,8 @@ fn wizard_prefills_existing_sync_group_when_editing() {
                 },
             ],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -467,8 +467,8 @@ fn wizard_deletes_existing_sync_group_from_menu() {
                 },
             ],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -526,8 +526,8 @@ fn wizard_can_go_back_from_delete_menu() {
                 },
             ],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,

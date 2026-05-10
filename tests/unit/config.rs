@@ -22,8 +22,8 @@ fn parses_value_tokens() {
         [[mirrors]]
         name = "personal"
         sync_visibility = "public"
-        repo_whitelist = ["^important-", "-mirror$"]
-        repo_blacklist = ["-archive$"]
+        repo_whitelist = "^important-|-mirror$"
+        repo_blacklist = "-archive$"
         create_missing = true
         visibility = "private"
         conflict_resolution = "auto_rebase_pull_request"
@@ -51,11 +51,11 @@ fn parses_value_tokens() {
     assert_eq!(config.mirrors[0].sync_visibility, SyncVisibility::Public);
     assert_eq!(
         config.mirrors[0].repo_whitelist,
-        vec!["^important-".to_string(), "-mirror$".to_string()]
+        Some("^important-|-mirror$".to_string())
     );
     assert_eq!(
         config.mirrors[0].repo_blacklist,
-        vec!["-archive$".to_string()]
+        Some("-archive$".to_string())
     );
     let webhook = config.webhook.unwrap();
     assert!(webhook.install);
@@ -105,8 +105,8 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
                 namespace: "alice".to_string(),
             }],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -134,8 +134,8 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
                 },
             ],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -199,8 +199,8 @@ fn sync_visibility_matches_repo_privacy() {
 #[test]
 fn repo_name_filter_applies_whitelist_then_blacklist() {
     let mut mirror = mirror_config();
-    mirror.repo_whitelist = vec!["^important-".to_string(), "-mirror$".to_string()];
-    mirror.repo_blacklist = vec!["-archive$".to_string()];
+    mirror.repo_whitelist = Some("^important-|-mirror$".to_string());
+    mirror.repo_blacklist = Some("-archive$".to_string());
     let filter = mirror.repo_filter().unwrap();
 
     assert!(filter.matches("important-api"));
@@ -217,7 +217,7 @@ fn validation_rejects_invalid_repo_filter_regex() {
         mirrors: vec![mirror_config()],
         webhook: None,
     };
-    config.mirrors[0].repo_whitelist = vec!["(".to_string()];
+    config.mirrors[0].repo_whitelist = Some("(".to_string());
 
     let err = validate_config(&config).unwrap_err().to_string();
 
@@ -238,8 +238,8 @@ fn validation_rejects_duplicate_mirror_endpoints() {
             name: "broken".to_string(),
             endpoints: vec![duplicate.clone(), duplicate],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -284,8 +284,8 @@ fn mirror_config() -> MirrorConfig {
             },
         ],
         sync_visibility: SyncVisibility::All,
-        repo_whitelist: Vec::new(),
-        repo_blacklist: Vec::new(),
+        repo_whitelist: None,
+        repo_blacklist: None,
         create_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,

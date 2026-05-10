@@ -339,7 +339,7 @@ secret = {{ value = "{WEBHOOK_SECRET}" }}
 [[mirrors]]
 name = "all"
 sync_visibility = "all"
-repo_whitelist = ['{}']
+repo_whitelist = '{}'
 create_missing = {}
 visibility = "public"
 conflict_resolution = "{}"
@@ -788,7 +788,7 @@ namespace = "{}"
         let contents = fs::read_to_string(&self.config_path)
             .with_context(|| format!("failed to read {}", self.config_path.display()))?;
         let escaped_pattern = pattern.replace('\'', "''");
-        let replacement = format!("repo_whitelist = ['{escaped_pattern}']");
+        let replacement = format!("repo_whitelist = '{escaped_pattern}'");
         let mut replaced = false;
         let mut updated = contents
             .lines()

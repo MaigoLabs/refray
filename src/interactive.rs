@@ -38,8 +38,8 @@ struct ParsedProfileUrl {
 
 #[derive(Clone, Debug, Default)]
 struct RepoFilterInput {
-    whitelist: Vec<String>,
-    blacklist: Vec<String>,
+    whitelist: Option<String>,
+    blacklist: Option<String>,
 }
 
 pub fn run_config_wizard(path: &Path) -> Result<ConfigWizardOutcome> {
@@ -780,7 +780,7 @@ fn prompt_repo_filters_styled(
     existing: Option<&RepoFilterInput>,
 ) -> Result<RepoFilterInput> {
     let existing = existing.cloned().unwrap_or_default();
-    let has_existing = !existing.whitelist.is_empty() || !existing.blacklist.is_empty();
+    let has_existing = existing.whitelist.is_some() || existing.blacklist.is_some();
     if !Confirm::with_theme(theme)
         .with_prompt("Configure repository name whitelist/blacklist?")
         .default(has_existing)
@@ -790,51 +790,44 @@ fn prompt_repo_filters_styled(
     }
 
     Ok(RepoFilterInput {
-        whitelist: prompt_repo_pattern_list_styled(
+        whitelist: prompt_repo_pattern_styled(
             theme,
-            "Whitelist regexes (comma-separated, empty means all repo names)",
+            "Whitelist regex (empty means all repo names)",
             &existing.whitelist,
         )?,
-        blacklist: prompt_repo_pattern_list_styled(
-            theme,
-            "Blacklist regexes (comma-separated)",
-            &existing.blacklist,
-        )?,
+        blacklist: prompt_repo_pattern_styled(theme, "Blacklist regex", &existing.blacklist)?,
     })
 }
 
-fn prompt_repo_pattern_list_styled(
+fn prompt_repo_pattern_styled(
     theme: &ColorfulTheme,
     prompt: &str,
-    existing: &[String],
-) -> Result<Vec<String>> {
+    existing: &Option<String>,
+) -> Result<Option<String>> {
     let input = Input::<String>::with_theme(theme)
         .with_prompt(prompt)
         .allow_empty(true)
-        .validate_with(|value: &String| validate_repo_pattern_list(value));
-    let input = if existing.is_empty() {
-        input
+        .validate_with(|value: &String| validate_repo_pattern(value));
+    let input = if let Some(existing) = existing {
+        input.default(existing.clone())
     } else {
-        input.default(existing.join(", "))
+        input
     };
     let value = input.interact_text()?;
-    Ok(parse_repo_pattern_list(&value))
+    Ok(parse_repo_pattern(&value))
 }
 
-fn validate_repo_pattern_list(value: &str) -> std::result::Result<(), String> {
-    for pattern in parse_repo_pattern_list(value) {
-        Regex::new(&pattern).map_err(|error| format!("invalid regex '{pattern}': {error}"))?;
-    }
+fn validate_repo_pattern(value: &str) -> std::result::Result<(), String> {
+    let Some(pattern) = parse_repo_pattern(value) else {
+        return Ok(());
+    };
+    Regex::new(&pattern).map_err(|error| format!("invalid regex '{pattern}': {error}"))?;
     Ok(())
 }
 
-fn parse_repo_pattern_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+fn parse_repo_pattern(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn sync_visibility_index(sync_visibility: &SyncVisibility) -> usize {
@@ -937,13 +930,11 @@ fn sync_visibility_label(sync_visibility: &SyncVisibility) -> &'static str {
 }
 
 fn repo_filter_label(mirror: &MirrorConfig) -> String {
-    match (mirror.repo_whitelist.len(), mirror.repo_blacklist.len()) {
-        (0, 0) => "repos: all names".to_string(),
-        (whitelist, 0) => format!("repos: whitelist {whitelist}"),
-        (0, blacklist) => format!("repos: blacklist {blacklist}"),
-        (whitelist, blacklist) => {
-            format!("repos: whitelist {whitelist}, blacklist {blacklist}")
-        }
+    match (&mirror.repo_whitelist, &mirror.repo_blacklist) {
+        (None, None) => "repos: all names".to_string(),
+        (Some(_), None) => "repos: whitelist".to_string(),
+        (None, Some(_)) => "repos: blacklist".to_string(),
+        (Some(_), Some(_)) => "repos: whitelist + blacklist".to_string(),
     }
 }
 

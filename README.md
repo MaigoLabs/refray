@@ -69,8 +69,8 @@ token = { value = "gitea_pat_..." }
 [[mirrors]]
 name = "personal"
 sync_visibility = "all"
-repo_whitelist = ["^important-"]
-repo_blacklist = ["-archive$"]
+repo_whitelist = "^important-"
+repo_blacklist = "-archive$"
 create_missing = true
 visibility = "private"
 conflict_resolution = "auto_rebase_pull_request"
@@ -179,7 +179,7 @@ Each mirror group is treated as a set of equivalent namespaces. Repositories are
 
 Set `sync_visibility = "all"`, `"private"`, or `"public"` on a mirror group to choose which repository visibility is included in that group. When `refray` creates a missing repository, it mirrors the visibility of the existing repository it is syncing from; `visibility` is only a fallback when no source visibility is available.
 
-Set `repo_whitelist = ["..."]` and/or `repo_blacklist = ["..."]` on a mirror group to filter repository names with regular expressions. An empty whitelist includes all repository names, and blacklist matches are excluded after whitelist matches. These name filters are independent from `sync_visibility`; both must match for a repository to be synced.
+Set `repo_whitelist = "..."` and/or `repo_blacklist = "..."` on a mirror group to filter repository names with regular expressions. Omit `repo_whitelist` to include all repository names, and blacklist matches are excluded after whitelist matches. These name filters are independent from `sync_visibility`; both must match for a repository to be synced.
 
 For every repository name found in any endpoint, `refray` will:
 

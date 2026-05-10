@@ -344,7 +344,7 @@ fn all_visibility_keeps_state_only_repos_for_deletion_detection() {
 #[test]
 fn repo_name_filters_do_not_treat_state_only_repos_as_deleted() {
     let mut mirror = test_mirror();
-    mirror.repo_whitelist = vec!["^public-".to_string()];
+    mirror.repo_whitelist = Some("^public-".to_string());
     let repo_filter = mirror.repo_filter().unwrap();
     let mut ref_state = RefState::default();
     ref_state.set_repo(
@@ -472,8 +472,8 @@ fn test_mirror() -> MirrorConfig {
         name: "sync-1".to_string(),
         endpoints: vec![endpoint("github"), endpoint("gitea")],
         sync_visibility: crate::config::SyncVisibility::All,
-        repo_whitelist: Vec::new(),
-        repo_blacklist: Vec::new(),
+        repo_whitelist: None,
+        repo_blacklist: None,
         create_missing: true,
         visibility: crate::config::Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,

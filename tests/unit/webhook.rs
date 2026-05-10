@@ -112,8 +112,8 @@ fn matches_jobs_by_provider_and_namespace() {
                 endpoint("gitea", NamespaceKind::User, "azalea"),
             ],
             sync_visibility: SyncVisibility::All,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -139,8 +139,8 @@ fn matching_jobs_respects_repo_name_filters() {
         name: "sync-1".to_string(),
         endpoints: vec![endpoint("github", NamespaceKind::User, "alice")],
         sync_visibility: SyncVisibility::All,
-        repo_whitelist: vec!["^important-".to_string()],
-        repo_blacklist: vec!["-archive$".to_string()],
+        repo_whitelist: Some("^important-".to_string()),
+        repo_blacklist: Some("-archive$".to_string()),
         create_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -159,7 +159,7 @@ fn matching_jobs_respects_repo_name_filters() {
     assert!(matching_jobs(&config, &webhook_event("important-archive")).is_empty());
     assert!(matching_jobs(&config, &webhook_event("random")).is_empty());
 
-    mirror.repo_whitelist.clear();
+    mirror.repo_whitelist = None;
     let config = Config {
         jobs: crate::config::DEFAULT_JOBS,
         sites: vec![site("github", ProviderKind::Github)],
@@ -357,8 +357,8 @@ fn uninstall_webhooks_skips_blocked_provider_access() {
                 endpoint("github-peer", NamespaceKind::User, "bob"),
             ],
             sync_visibility: SyncVisibility::Public,
-            repo_whitelist: Vec::new(),
-            repo_blacklist: Vec::new(),
+            repo_whitelist: None,
+            repo_blacklist: None,
             create_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
@@ -710,8 +710,8 @@ fn filtered_mirror() -> MirrorConfig {
             endpoint("github-peer", NamespaceKind::User, "bob"),
         ],
         sync_visibility: SyncVisibility::Public,
-        repo_whitelist: vec!["^important-".to_string()],
-        repo_blacklist: vec!["-archive$".to_string()],
+        repo_whitelist: Some("^important-".to_string()),
+        repo_blacklist: Some("-archive$".to_string()),
         create_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,

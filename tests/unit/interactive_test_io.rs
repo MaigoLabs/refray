@@ -531,7 +531,7 @@ where
     W: Write,
 {
     let existing = existing.cloned().unwrap_or_default();
-    let has_existing = !existing.whitelist.is_empty() || !existing.blacklist.is_empty();
+    let has_existing = existing.whitelist.is_some() || existing.blacklist.is_some();
     if !prompt_bool(
         reader,
         writer,
@@ -542,40 +542,34 @@ where
     }
 
     Ok(RepoFilterInput {
-        whitelist: prompt_repo_pattern_list(
+        whitelist: prompt_repo_pattern(
             reader,
             writer,
-            "Whitelist regexes (comma-separated, empty means all repo names)",
+            "Whitelist regex (empty means all repo names)",
             &existing.whitelist,
         )?,
-        blacklist: prompt_repo_pattern_list(
-            reader,
-            writer,
-            "Blacklist regexes (comma-separated)",
-            &existing.blacklist,
-        )?,
+        blacklist: prompt_repo_pattern(reader, writer, "Blacklist regex", &existing.blacklist)?,
     })
 }
 
-fn prompt_repo_pattern_list<R, W>(
+fn prompt_repo_pattern<R, W>(
     reader: &mut R,
     writer: &mut W,
     label: &str,
-    existing: &[String],
-) -> Result<Vec<String>>
+    existing: &Option<String>,
+) -> Result<Option<String>>
 where
     R: BufRead,
     W: Write,
 {
-    let value = if existing.is_empty() {
-        prompt_optional(reader, writer, label)?
-    } else {
-        prompt_with_default(reader, writer, label, &existing.join(", "))?
+    let value = match existing {
+        Some(existing) => prompt_with_default(reader, writer, label, existing)?,
+        None => prompt_optional(reader, writer, label)?,
     };
-    if let Err(error) = validate_repo_pattern_list(&value) {
+    if let Err(error) = validate_repo_pattern(&value) {
         bail!(error);
     }
-    Ok(parse_repo_pattern_list(&value))
+    Ok(parse_repo_pattern(&value))
 }
 
 fn sync_visibility_value(sync_visibility: &SyncVisibility) -> &'static str {
