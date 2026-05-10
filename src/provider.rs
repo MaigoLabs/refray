@@ -371,7 +371,19 @@ impl<'a> ProviderClient<'a> {
                     self.site.api_base(),
                     endpoint.namespace
                 );
-                self.paged_remote_repos::<GitlabProject>(&url)
+                let mut projects = self.paged_get::<GitlabProject>(&url)?;
+                let owned_url = format!(
+                    "{}/projects?owned=true&simple=true&per_page=100",
+                    self.site.api_base()
+                );
+                for project in self.paged_get::<GitlabProject>(&owned_url)? {
+                    if project.is_in_namespace(&endpoint.namespace)
+                        && !projects.iter().any(|existing| existing.same_path(&project))
+                    {
+                        projects.push(project);
+                    }
+                }
+                Ok(projects.into_iter().map(Into::into).collect())
             }
             NamespaceKind::Org | NamespaceKind::Group => {
                 let encoded = urlencoding(&endpoint.namespace);
@@ -411,8 +423,20 @@ impl<'a> ProviderClient<'a> {
         }
 
         let url = format!("{}/projects", self.site.api_base());
-        self.post_json::<GitlabProject>(&url, &serde_json::Value::Object(body))
-            .map(Into::into)
+        match self.post_json::<GitlabProject>(&url, &serde_json::Value::Object(body)) {
+            Ok(project) => Ok(project.into()),
+            Err(error) if is_already_taken_error(&error) => {
+                let existing_url = self.gitlab_project_url(endpoint, name);
+                self.get_json::<GitlabProject>(&existing_url)
+                    .map(Into::into)
+                    .with_context(|| {
+                        format!(
+                            "GitLab reported that {name} already exists, but failed to fetch {existing_url}: {error:#}"
+                        )
+                    })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn gitlab_delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
@@ -982,6 +1006,16 @@ fn is_conflict_error(error: &anyhow::Error) -> bool {
     error.to_string().contains("409 Conflict")
 }
 
+fn is_already_taken_error(error: &anyhow::Error) -> bool {
+    let text = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    text.contains("has already been taken")
+}
+
 fn webhook_urls_match(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -1066,9 +1100,50 @@ impl From<GithubRepo> for RemoteRepo {
 struct GitlabProject {
     name: String,
     path: Option<String>,
+    path_with_namespace: Option<String>,
+    namespace: Option<GitlabNamespace>,
     http_url_to_repo: String,
     visibility: String,
     description: Option<String>,
+}
+
+impl GitlabProject {
+    fn project_path(&self) -> &str {
+        self.path.as_deref().unwrap_or(&self.name)
+    }
+
+    fn is_in_namespace(&self, namespace: &str) -> bool {
+        self.namespace
+            .as_ref()
+            .and_then(GitlabNamespace::full_path)
+            .is_some_and(|path| path.eq_ignore_ascii_case(namespace))
+            || self
+                .path_with_namespace
+                .as_deref()
+                .and_then(|path| path.rsplit_once('/').map(|(namespace, _)| namespace))
+                .is_some_and(|path| path.eq_ignore_ascii_case(namespace))
+    }
+
+    fn same_path(&self, other: &Self) -> bool {
+        match (&self.path_with_namespace, &other.path_with_namespace) {
+            (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+            _ => self
+                .project_path()
+                .eq_ignore_ascii_case(other.project_path()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct GitlabNamespace {
+    path: Option<String>,
+    full_path: Option<String>,
+}
+
+impl GitlabNamespace {
+    fn full_path(&self) -> Option<&str> {
+        self.full_path.as_deref().or(self.path.as_deref())
+    }
 }
 
 impl From<GitlabProject> for RemoteRepo {

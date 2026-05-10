@@ -185,6 +185,104 @@ fn detect_namespace_kind_uses_authenticated_gitea_api() {
 }
 
 #[test]
+fn list_gitlab_user_repos_merges_authenticated_owned_projects() {
+    let owned_projects = r#"[
+        {"name":"repo","path":"repo","path_with_namespace":"alice/repo","http_url_to_repo":"https://gitlab.example.test/alice/repo.git","visibility":"private","description":null,"namespace":{"path":"alice","full_path":"alice"}},
+        {"name":"other","path":"other","path_with_namespace":"bob/other","http_url_to_repo":"https://gitlab.example.test/bob/other.git","visibility":"public","description":null,"namespace":{"path":"bob","full_path":"bob"}}
+    ]"#;
+    let (api_url, handle) = request_server(
+        vec![("200 OK", "[]"), ("200 OK", owned_projects)],
+        |index, request| match index {
+            0 => assert!(
+                request
+                    .starts_with("GET /users/alice/projects?simple=true&per_page=100&owned=true "),
+                "request was {request}"
+            ),
+            1 => assert!(
+                request.starts_with("GET /projects?owned=true&simple=true&per_page=100 "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    let repos = ProviderClient::new(&site)
+        .unwrap()
+        .list_repos(&EndpointConfig {
+            site: "gitlab".to_string(),
+            kind: NamespaceKind::User,
+            namespace: "alice".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].name, "repo");
+    assert!(repos[0].private);
+    handle.join().unwrap();
+}
+
+#[test]
+fn create_gitlab_repo_returns_existing_repo_when_path_is_taken() {
+    let existing = r#"{"name":"repo","path":"repo","path_with_namespace":"alice/repo","http_url_to_repo":"https://gitlab.example.test/alice/repo.git","visibility":"public","description":"existing","namespace":{"path":"alice","full_path":"alice"}}"#;
+    let (api_url, handle) = request_server(
+        vec![
+            (
+                "400 Bad Request",
+                r#"{"message":{"name":["has already been taken"],"path":["has already been taken"]}}"#,
+            ),
+            ("200 OK", existing),
+        ],
+        |index, request| match index {
+            0 => {
+                assert!(
+                    request.starts_with("POST /projects "),
+                    "request was {request}"
+                );
+                assert!(
+                    request.contains(r#""name":"repo""#),
+                    "request was {request}"
+                );
+                assert!(
+                    request.contains(r#""path":"repo""#),
+                    "request was {request}"
+                );
+            }
+            1 => assert!(
+                request.starts_with("GET /projects/alice%2Frepo "),
+                "request was {request}"
+            ),
+            _ => unreachable!(),
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    let repo = ProviderClient::new(&site)
+        .unwrap()
+        .create_repo(
+            &EndpointConfig {
+                site: "gitlab".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            &Visibility::Public,
+            Some("description"),
+        )
+        .unwrap();
+
+    assert_eq!(repo.name, "repo");
+    assert_eq!(repo.clone_url, "https://gitlab.example.test/alice/repo.git");
+    handle.join().unwrap();
+}
+
+#[test]
 fn install_webhook_posts_github_hook_when_missing() {
     let (api_url, handle) = request_server(
         vec![("200 OK", "[]"), ("201 Created", r#"{"id":1}"#)],
