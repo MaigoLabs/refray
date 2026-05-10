@@ -237,7 +237,6 @@ fn sync_group(
         );
     }
 
-    let repo_log_width = repo_log_width(&repo_names);
     let repo_jobs = repo_names
         .into_iter()
         .map(|repo_name| {
@@ -260,11 +259,10 @@ fn sync_group(
     let base_ref_state = context.ref_state.clone();
     let queue = Arc::new(Mutex::new(repo_jobs));
     let (sender, receiver) = mpsc::channel();
-    let use_status_area = worker_count > 1;
+    let use_repo_logs = worker_count > 1;
     let jobs = context.options.jobs;
-    let _status_guard = use_status_area.then(|| logging::start_status_area(worker_count));
     let failures = thread::scope(|scope| {
-        for worker_id in 0..worker_count {
+        for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
             let sender = sender.clone();
             let redactor = context.redactor.clone();
@@ -275,9 +273,7 @@ fn sync_group(
 
             scope.spawn(move || {
                 while let Some(mut job) = pop_repo_job(&queue) {
-                    let _repo_log_guard = use_status_area.then(|| {
-                        logging::start_repo_log(job.repo_name.clone(), worker_id, repo_log_width)
-                    });
+                    let _repo_log_guard = use_repo_logs.then(logging::start_repo_log);
                     let repo_context = RepoSyncContext {
                         config,
                         mirror,
@@ -381,15 +377,6 @@ fn pop_repo_job(queue: &Arc<Mutex<VecDeque<RepoSyncJob>>>) -> Option<RepoSyncJob
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .pop_front()
-}
-
-fn repo_log_width(repo_names: &BTreeSet<String>) -> usize {
-    repo_names
-        .iter()
-        .map(|name| name.chars().count())
-        .max()
-        .unwrap_or(4)
-        .clamp(4, 32)
 }
 
 struct RepoSyncJob {
