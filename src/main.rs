@@ -2,6 +2,7 @@ mod config;
 mod git;
 mod interactive;
 mod logging;
+mod parallel;
 mod provider;
 mod state;
 mod sync;

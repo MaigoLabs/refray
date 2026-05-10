@@ -124,7 +124,7 @@ Retry only repositories that failed during the previous non-dry-run sync:
 refray sync --retry-failed
 ```
 
-Control parallelism for sync, serve, and webhook commands in config:
+Control parallelism for sync, serve, and webhook commands in config. The default is 10 workers:
 
 ```toml
 jobs = 8
