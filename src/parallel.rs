@@ -20,13 +20,16 @@ where
     let worker_count = jobs.min(items.len());
     let queue = Arc::new(Mutex::new(VecDeque::from(items)));
     let (sender, receiver) = mpsc::channel();
+    let repo_log_context = crate::logging::current_repo_log_context();
 
     thread::scope(|scope| {
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
             let sender = sender.clone();
             let f = &f;
+            let repo_log_context = repo_log_context.clone();
             scope.spawn(move || {
+                let _repo_log_guard = crate::logging::inherit_repo_log(repo_log_context);
                 while let Some(item) = pop_item(&queue) {
                     if sender.send(f(item)).is_err() {
                         break;
