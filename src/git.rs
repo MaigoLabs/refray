@@ -86,6 +86,12 @@ pub struct GitMirror {
     dry_run: bool,
 }
 
+struct CommitterIdentity {
+    name: String,
+    email: String,
+    date: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Redactor {
     secrets: Vec<String>,
@@ -582,6 +588,7 @@ impl GitMirror {
             return Ok(format!("dry-run-rebased-{}", short_sha(tip)));
         }
 
+        let commits = self.replay_commits(base, tip)?;
         let worktree = tempfile::TempDir::new().context("failed to create temporary worktree")?;
         let worktree_path = worktree.path().to_path_buf();
         self.run([
@@ -589,12 +596,13 @@ impl GitMirror {
             "add",
             "--detach",
             worktree_path.to_str().unwrap(),
-            tip,
+            onto,
         ])?;
 
-        let rebase_result = self.worktree_git(&worktree_path, ["rebase", "--onto", onto, base]);
-        if let Err(error) = rebase_result {
-            let _ = self.worktree_git(&worktree_path, ["rebase", "--abort"]);
+        let replay_result = self.replay_commits_preserving_committer(&worktree_path, &commits);
+        if let Err(error) = replay_result {
+            let _ = self.worktree_git(&worktree_path, ["cherry-pick", "--abort"]);
+            let _ = self.worktree_git(&worktree_path, ["reset", "--hard"]);
             let _ = self.run([
                 "worktree",
                 "remove",
@@ -611,6 +619,66 @@ impl GitMirror {
             worktree_path.to_str().unwrap(),
         ])?;
         Ok(rebased.trim().to_string())
+    }
+
+    fn replay_commits(&self, base: &str, tip: &str) -> Result<Vec<String>> {
+        let range = format!("{base}..{tip}");
+        Ok(self
+            .output([
+                "rev-list",
+                "--reverse",
+                "--topo-order",
+                "--no-merges",
+                &range,
+            ])?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
+    fn replay_commits_preserving_committer(
+        &self,
+        worktree: &Path,
+        commits: &[String],
+    ) -> Result<()> {
+        for commit in commits {
+            let committer = self.committer_identity(commit)?;
+            self.worktree_git(worktree, ["cherry-pick", "--no-commit", commit])?;
+            self.worktree_git_with_committer(
+                worktree,
+                ["commit", "--no-gpg-sign", "-C", commit],
+                &committer,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn committer_identity(&self, commit: &str) -> Result<CommitterIdentity> {
+        let output = self.output(["show", "-s", "--format=%cn%x00%ce%x00%cI", commit])?;
+        let output = output.trim_end_matches('\n');
+        let mut parts = output.split('\0');
+        let name = parts
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("commit {commit} has no committer name"))?;
+        let email = parts
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("commit {commit} has no committer email"))?;
+        let date = parts
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("commit {commit} has no committer date"))?;
+        if parts.next().is_some() {
+            bail!("commit {commit} has unexpected committer metadata");
+        }
+        Ok(CommitterIdentity {
+            name: name.to_string(),
+            email: email.to_string(),
+            date: date.to_string(),
+        })
     }
 
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
@@ -698,6 +766,35 @@ impl GitMirror {
             .with_context(|| "failed to run git")?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(GitCommandError::new(
+                "git",
+                self.redactor
+                    .redact(&String::from_utf8_lossy(&output.stdout)),
+                self.redactor
+                    .redact(&String::from_utf8_lossy(&output.stderr)),
+            )
+            .into())
+        }
+    }
+
+    fn worktree_git_with_committer<const N: usize>(
+        &self,
+        worktree: &Path,
+        args: [&str; N],
+        committer: &CommitterIdentity,
+    ) -> Result<()> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .env("GIT_COMMITTER_NAME", &committer.name)
+            .env("GIT_COMMITTER_EMAIL", &committer.email)
+            .env("GIT_COMMITTER_DATE", &committer.date)
+            .output()
+            .with_context(|| "failed to run git")?;
+        if output.status.success() {
+            Ok(())
         } else {
             Err(GitCommandError::new(
                 "git",

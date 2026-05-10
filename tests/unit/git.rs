@@ -178,7 +178,15 @@ fn auto_rebase_branch_conflict_replays_later_tip_and_marks_force_targets() {
     let a_tip = fixture.commit_file("a", "a.txt", "a\n", 1_700_000_100);
     fixture.push_head(&fixture.remote_a, "main");
     fixture.reset_hard(&base);
-    let b_tip = fixture.commit_file("b", "b.txt", "b\n", 1_700_000_200);
+    let b_tip = fixture.commit_file_with_committer(
+        "b",
+        "b.txt",
+        "b\n",
+        1_700_000_200,
+        "Original Committer",
+        "original-committer@example.test",
+        1_700_000_250,
+    );
     fixture.push_head(&fixture.remote_b, "main");
 
     let mirror = fixture.mirror();
@@ -205,6 +213,10 @@ fn auto_rebase_branch_conflict_replays_later_tip_and_marks_force_targets() {
         .find(|update| update.target_remote == "b")
         .unwrap();
     assert!(b_update.force);
+    assert_eq!(
+        fixture.mirror_committer(&decision.sha),
+        fixture.mirror_committer(&b_tip)
+    );
 
     mirror
         .push_branch_updates(&fixture.remotes(), &decision.updates)
@@ -495,6 +507,35 @@ impl GitFixture {
         self.head()
     }
 
+    fn commit_file_with_committer(
+        &self,
+        message: &str,
+        file_name: &str,
+        contents: &str,
+        author_timestamp: i64,
+        committer_name: &str,
+        committer_email: &str,
+        committer_timestamp: i64,
+    ) -> String {
+        let path = self.work.join(file_name);
+        fs::write(path, contents).unwrap();
+        git(Some(&self.work), ["add", file_name]);
+
+        let author_date = format!("@{author_timestamp} +0000");
+        let committer_date = format!("@{committer_timestamp} +0000");
+        let output = Command::new("git")
+            .current_dir(&self.work)
+            .env("GIT_AUTHOR_DATE", &author_date)
+            .env("GIT_COMMITTER_NAME", committer_name)
+            .env("GIT_COMMITTER_EMAIL", committer_email)
+            .env("GIT_COMMITTER_DATE", &committer_date)
+            .args(["commit", "-m", message])
+            .output()
+            .unwrap();
+        assert_success(&output, "git commit");
+        self.head()
+    }
+
     fn head(&self) -> String {
         git_output(Some(&self.work), ["rev-parse", "HEAD"])
     }
@@ -558,6 +599,20 @@ impl GitFixture {
         .unwrap()
         .status
         .success()
+    }
+
+    fn mirror_committer(&self, reference: &str) -> String {
+        git_output(
+            None,
+            [
+                "--git-dir",
+                self.mirror_path.to_str().unwrap(),
+                "show",
+                "-s",
+                "--format=%cn <%ce> %cI",
+                reference,
+            ],
+        )
     }
 }
 
