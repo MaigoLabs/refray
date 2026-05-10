@@ -380,9 +380,10 @@ namespace = "{}"
         git(&work, ["tag", "v1.0.0"])?;
         let remote_url = source.authenticated_repo_url(&repo)?;
         self.git(&work, ["remote", "add", "origin", &remote_url])?;
-        self.git(
+        self.git_retry(
             &work,
             ["push", "origin", "HEAD:main", "feature/github", "v1.0.0"],
+            "initial seed push",
         )?;
         source.wait_branch(
             &repo,
@@ -393,6 +394,7 @@ namespace = "{}"
         source.wait_repo_listed(&repo)?;
         self.sync_repo(&repo, [])?;
         self.assert_branch_all_equal_after_optional_resync(&repo, MAIN_BRANCH)?;
+        self.assert_default_branch_all_except(&repo, MAIN_BRANCH, &source.site_name)?;
         self.assert_branch_all_equal(&repo, "feature/github")?;
         self.assert_tag_all_equal(&repo, "v1.0.0")?;
 
@@ -699,7 +701,7 @@ namespace = "{}"
         )?;
         let remote_url = provider.authenticated_repo_url(repo)?;
         self.git(&work, ["remote", "add", "origin", &remote_url])?;
-        self.git(&work, ["push", "origin", "HEAD:main"])?;
+        self.git_retry(&work, ["push", "origin", "HEAD:main"], "seed push")?;
         provider.wait_branch(
             repo,
             MAIN_BRANCH,
@@ -726,7 +728,11 @@ namespace = "{}"
         for provider in &self.settings.providers {
             let remote_url = provider.authenticated_repo_url(repo)?;
             self.git(&work, ["remote", "add", &provider.site_name, &remote_url])?;
-            self.git(&work, ["push", &provider.site_name, "HEAD:main"])?;
+            self.git_retry(
+                &work,
+                ["push", &provider.site_name, "HEAD:main"],
+                "seed-all push",
+            )?;
             provider.wait_branch(repo, MAIN_BRANCH, &sha)?;
             provider.wait_repo_listed(repo)?;
             provider.unprotect_branch(repo, MAIN_BRANCH)?;
@@ -785,6 +791,10 @@ namespace = "{}"
             .output()
             .context("failed to run git")?;
         assert_output_success(output, "git", &self.redactor)
+    }
+
+    fn git_retry<const N: usize>(&self, path: &Path, args: [&str; N], label: &str) -> Result<()> {
+        retry(label, || self.git(path, args))
     }
 
     fn set_repo_whitelist(&self, pattern: &str) -> Result<()> {
@@ -1062,6 +1072,30 @@ namespace = "{}"
                 self.assert_branch_all_equal(repo, branch)
             }
         }
+    }
+
+    fn assert_default_branch_all_except(
+        &self,
+        repo: &str,
+        branch: &str,
+        excluded_site: &str,
+    ) -> Result<()> {
+        retry("default branch metadata", || {
+            for provider in &self.settings.providers {
+                if provider.site_name == excluded_site {
+                    continue;
+                }
+                let actual = provider.default_branch(repo)?;
+                if actual.as_deref() != Some(branch) {
+                    bail!(
+                        "expected default branch {branch} on {} for {repo}, got {:?}",
+                        provider.site_name,
+                        actual
+                    );
+                }
+            }
+            Ok(())
+        })
     }
 
     fn assert_tag_all_equal(&self, repo: &str, tag: &str) -> Result<()> {
@@ -1385,6 +1419,17 @@ impl ProviderAccount {
                 .map(|visibility| visibility != "public")
                 .ok_or_else(|| anyhow!("{} repo response missing visibility", self.site_name)),
         }
+    }
+
+    fn default_branch(&self, repo: &str) -> Result<Option<String>> {
+        let value = self
+            .get_json::<Value>(&self.repo_api_url(repo))
+            .with_context(|| format!("failed to inspect {} default branch", self.site_name))?;
+        Ok(value
+            .get("default_branch")
+            .and_then(Value::as_str)
+            .filter(|branch| !branch.is_empty())
+            .map(ToOwned::to_owned))
     }
 
     fn wait_repo_present(&self, repo: &str) -> Result<()> {

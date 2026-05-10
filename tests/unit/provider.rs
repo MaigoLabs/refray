@@ -226,6 +226,42 @@ fn list_gitlab_user_repos_merges_authenticated_owned_projects() {
 }
 
 #[test]
+fn list_gitlab_group_repos_ignores_deletion_scheduled_projects() {
+    let projects = r#"[
+        {"name":"active","path":"active","path_with_namespace":"maigolabs/active","http_url_to_repo":"https://gitlab.example.test/maigolabs/active.git","visibility":"private","description":null,"namespace":{"path":"maigolabs","full_path":"maigolabs"}},
+        {"name":"Kairos-deletion_scheduled-82068172","path":"Kairos-deletion_scheduled-82068172","path_with_namespace":"maigolabs/Kairos-deletion_scheduled-82068172","http_url_to_repo":"https://gitlab.example.test/maigolabs/Kairos-deletion_scheduled-82068172.git","visibility":"private","description":null,"namespace":{"path":"maigolabs","full_path":"maigolabs"}},
+        {"name":"marked-at","path":"marked-at","path_with_namespace":"maigolabs/marked-at","http_url_to_repo":"https://gitlab.example.test/maigolabs/marked-at.git","visibility":"private","description":null,"namespace":{"path":"maigolabs","full_path":"maigolabs"},"marked_for_deletion_at":"2026-05-17"},
+        {"name":"marked-on","path":"marked-on","path_with_namespace":"maigolabs/marked-on","http_url_to_repo":"https://gitlab.example.test/maigolabs/marked-on.git","visibility":"private","description":null,"namespace":{"path":"maigolabs","full_path":"maigolabs"},"marked_for_deletion_on":"2026-05-17"},
+        {"name":"pending","path":"pending","path_with_namespace":"maigolabs/pending","http_url_to_repo":"https://gitlab.example.test/maigolabs/pending.git","visibility":"private","description":null,"namespace":{"path":"maigolabs","full_path":"maigolabs"},"pending_delete":true}
+    ]"#;
+    let (api_url, handle) = one_request_server("200 OK", projects, |request| {
+        assert!(
+            request.starts_with(
+                "GET /groups/maigolabs/projects?simple=true&include_subgroups=false&per_page=100 "
+            ),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    let repos = ProviderClient::new(&site)
+        .unwrap()
+        .list_repos(&EndpointConfig {
+            site: "gitlab".to_string(),
+            kind: NamespaceKind::Group,
+            namespace: "maigolabs".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].name, "active");
+    handle.join().unwrap();
+}
+
+#[test]
 fn create_gitlab_repo_returns_existing_repo_when_path_is_taken() {
     let existing = r#"{"name":"repo","path":"repo","path_with_namespace":"alice/repo","http_url_to_repo":"https://gitlab.example.test/alice/repo.git","visibility":"public","description":"existing","namespace":{"path":"alice","full_path":"alice"}}"#;
     let (api_url, handle) = request_server(
@@ -279,6 +315,82 @@ fn create_gitlab_repo_returns_existing_repo_when_path_is_taken() {
 
     assert_eq!(repo.name, "repo");
     assert_eq!(repo.clone_url, "https://gitlab.example.test/alice/repo.git");
+    handle.join().unwrap();
+}
+
+#[test]
+fn set_github_default_branch_patches_repo() {
+    let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
+        assert!(
+            request.starts_with("PATCH /repos/alice/repo "),
+            "request was {request}"
+        );
+        assert!(
+            request.contains(r#""default_branch":"main""#),
+            "request was {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer secret"),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Github, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .set_default_branch(
+            &EndpointConfig {
+                site: "github".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            "main",
+        )
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn set_gitlab_default_branch_updates_project() {
+    let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
+        assert!(
+            request.starts_with("PUT /projects/alice%2Frepo "),
+            "request was {request}"
+        );
+        assert!(
+            request.contains(r#""default_branch":"main""#),
+            "request was {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("private-token: secret"),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .set_default_branch(
+            &EndpointConfig {
+                site: "gitlab".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            "main",
+        )
+        .unwrap();
     handle.join().unwrap();
 }
 
@@ -707,6 +819,44 @@ fn create_gitea_repo_returns_existing_repo_on_conflict() {
 
     assert_eq!(repo.name, "repo");
     assert_eq!(repo.clone_url, "https://gitea.example.test/alice/repo.git");
+    handle.join().unwrap();
+}
+
+#[test]
+fn set_gitea_default_branch_patches_repo() {
+    let (api_url, handle) = one_request_server("200 OK", "{}", |request| {
+        assert!(
+            request.starts_with("PATCH /repos/alice/repo "),
+            "request was {request}"
+        );
+        assert!(
+            request.contains(r#""default_branch":"main""#),
+            "request was {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: token secret"),
+            "request was {request}"
+        );
+    });
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitea, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .set_default_branch(
+            &EndpointConfig {
+                site: "gitea".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            "main",
+        )
+        .unwrap();
     handle.join().unwrap();
 }
 

@@ -172,6 +172,19 @@ impl<'a> ProviderClient<'a> {
         )
     }
 
+    pub fn set_default_branch(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+    ) -> Result<()> {
+        dispatch_provider!(self.site.provider,
+            github => self.github_set_default_branch(endpoint, repo_name, branch),
+            gitlab => self.gitlab_set_default_branch(endpoint, repo_name, branch),
+            gitea_like => self.gitea_set_default_branch(endpoint, repo_name, branch),
+        )
+    }
+
     pub fn install_webhook(
         &self,
         endpoint: &EndpointConfig,
@@ -317,6 +330,17 @@ impl<'a> ProviderClient<'a> {
         self.delete(&url).map(|_| ())
     }
 
+    fn github_set_default_branch(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+    ) -> Result<()> {
+        let url = self.repo_url(endpoint, repo_name, "GitHub")?;
+        self.patch_json::<serde_json::Value>(&url, &json!({ "default_branch": branch }))
+            .map(|_| ())
+    }
+
     fn github_install_webhook(
         &self,
         endpoint: &EndpointConfig,
@@ -441,7 +465,11 @@ impl<'a> ProviderClient<'a> {
                         projects.push(project);
                     }
                 }
-                Ok(projects.into_iter().map(Into::into).collect())
+                Ok(projects
+                    .into_iter()
+                    .filter(|project| !project.is_deletion_scheduled())
+                    .map(Into::into)
+                    .collect())
             }
             NamespaceKind::Org | NamespaceKind::Group => {
                 let encoded = urlencoding(&endpoint.namespace);
@@ -450,7 +478,12 @@ impl<'a> ProviderClient<'a> {
                     self.site.api_base(),
                     encoded
                 );
-                self.paged_remote_repos::<GitlabProject>(&url)
+                Ok(self
+                    .paged_get::<GitlabProject>(&url)?
+                    .into_iter()
+                    .filter(|project| !project.is_deletion_scheduled())
+                    .map(Into::into)
+                    .collect())
             }
         }
     }
@@ -500,6 +533,17 @@ impl<'a> ProviderClient<'a> {
     fn gitlab_delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
         let url = self.gitlab_project_url(endpoint, repo_name);
         self.delete(&url).map(|_| ())
+    }
+
+    fn gitlab_set_default_branch(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+    ) -> Result<()> {
+        let url = self.gitlab_project_url(endpoint, repo_name);
+        self.put_json::<serde_json::Value>(&url, &json!({ "default_branch": branch }))
+            .map(|_| ())
     }
 
     fn gitlab_group(&self, namespace: &str) -> Result<GitlabGroup> {
@@ -693,6 +737,17 @@ impl<'a> ProviderClient<'a> {
     fn gitea_delete_repo(&self, endpoint: &EndpointConfig, repo_name: &str) -> Result<()> {
         let url = self.repo_url(endpoint, repo_name, "Gitea/Forgejo")?;
         self.delete(&url).map(|_| ())
+    }
+
+    fn gitea_set_default_branch(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+    ) -> Result<()> {
+        let url = self.repo_url(endpoint, repo_name, "Gitea/Forgejo")?;
+        self.patch_json::<serde_json::Value>(&url, &json!({ "default_branch": branch }))
+            .map(|_| ())
     }
 
     fn gitea_install_webhook(
@@ -1163,6 +1218,10 @@ struct GitlabProject {
     http_url_to_repo: String,
     visibility: String,
     description: Option<String>,
+    marked_for_deletion_at: Option<String>,
+    marked_for_deletion_on: Option<String>,
+    #[serde(default)]
+    pending_delete: bool,
 }
 
 impl GitlabProject {
@@ -1190,6 +1249,37 @@ impl GitlabProject {
                 .eq_ignore_ascii_case(other.project_path()),
         }
     }
+
+    fn is_deletion_scheduled(&self) -> bool {
+        self.pending_delete
+            || self
+                .marked_for_deletion_at
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            || self
+                .marked_for_deletion_on
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            || is_gitlab_deletion_scheduled_path(&self.name)
+            || self
+                .path
+                .as_deref()
+                .is_some_and(is_gitlab_deletion_scheduled_path)
+            || self
+                .path_with_namespace
+                .as_deref()
+                .and_then(|path| path.rsplit('/').next())
+                .is_some_and(is_gitlab_deletion_scheduled_path)
+    }
+}
+
+fn is_gitlab_deletion_scheduled_path(path: &str) -> bool {
+    let Some((name, project_id)) = path.rsplit_once("-deletion_scheduled-") else {
+        return false;
+    };
+    !name.is_empty()
+        && !project_id.is_empty()
+        && project_id.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[derive(Deserialize)]

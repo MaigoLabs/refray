@@ -38,6 +38,7 @@ use self::state::{
 };
 
 const CONFLICT_BRANCH_ROOT: &str = "refray/conflicts/";
+const DEFAULT_BRANCH: &str = "main";
 
 #[derive(Clone, Debug)]
 pub struct SyncOptions {
@@ -842,6 +843,7 @@ fn sync_repo(
             let Some(refs) = check_remote_refs(context, repo_name, &remotes)? else {
                 return Ok(RepoSyncOutcome::default());
             };
+            set_default_branch_for_created_repos(context, repo_name, &created_repos, &refs)?;
             refs
         } else {
             initial_ref_state
@@ -855,6 +857,48 @@ fn sync_repo(
         created_repos,
         ..RepoSyncOutcome::default()
     })
+}
+
+fn set_default_branch_for_created_repos(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    created_repos: &[EndpointRepo],
+    refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<()> {
+    if created_repos.is_empty() {
+        return Ok(());
+    }
+
+    let targets = created_repos
+        .iter()
+        .filter(|repo| {
+            refs.get(&remote_name_for_endpoint_repo(repo))
+                .is_some_and(|refs| refs.branches.contains_key(DEFAULT_BRANCH))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    crate::parallel::map(targets, context.jobs, |repo| {
+        crate::logln!(
+            "  {} branch {} {}",
+            style("default").green().bold(),
+            style(DEFAULT_BRANCH).cyan(),
+            style(format!("on {}", repo.endpoint.label())).dim()
+        );
+        let site = context.config.site(&repo.endpoint.site).unwrap();
+        ProviderClient::new(site)?
+            .set_default_branch(&repo.endpoint, repo_name, DEFAULT_BRANCH)
+            .with_context(|| {
+                format!(
+                    "failed to set default branch for {} on {}",
+                    repo_name,
+                    repo.endpoint.label()
+                )
+            })?;
+        Ok(())
+    })?;
+
+    Ok(())
 }
 
 fn sync_assumed_repo(
@@ -972,6 +1016,7 @@ fn sync_assumed_repo(
                     ..RepoSyncOutcome::default()
                 });
             };
+            set_default_branch_for_created_repos(context, repo_name, &created_repos, &refs)?;
             refs
         } else {
             initial_ref_check.refs
