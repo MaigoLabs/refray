@@ -25,8 +25,7 @@ const WEBHOOK_SECRET: &str = "refray-e2e-secret";
 #[test]
 #[ignore = "destructive live-provider e2e test; run explicitly with --ignored"]
 fn sequential_live_e2e_all_supported_features() -> Result<()> {
-    let env = EnvFile::load(Path::new(".env"))?;
-    let settings = E2eSettings::from_env(&env)?;
+    let settings = load_e2e_settings()?;
     settings.require_destructive_guard()?;
 
     let mut run = E2eRun::new(settings)?;
@@ -57,6 +56,42 @@ fn sequential_live_e2e_all_supported_features() -> Result<()> {
 
     run.clear_e2e_repositories()?;
     Ok(())
+}
+
+#[test]
+#[ignore = "destructive live-provider e2e test; run explicitly with --ignored"]
+fn sequential_live_e2e_force_push_detection() -> Result<()> {
+    let settings = load_e2e_settings()?;
+    settings.require_destructive_guard()?;
+
+    let mut run = E2eRun::new(settings)?;
+    run.preflight()?;
+    run.clear_repositories()?;
+    run.write_config(ConflictMode::AutoRebasePullRequest, None, true)?;
+
+    eprintln!("e2e phase: force-push rewind");
+    run.rewind_force_push_propagates()?;
+    eprintln!("e2e phase: force-push rewrite");
+    run.rewrite_force_push_propagates()?;
+    eprintln!("e2e phase: force-push fast-forward guard");
+    run.normal_fast_forward_still_syncs()?;
+    eprintln!("e2e phase: force-push conflict");
+    run.conflicting_force_pushes_are_not_propagated()?;
+    eprintln!("e2e phase: force-push plus fast-forward conflict");
+    run.force_push_plus_fast_forward_is_not_propagated()?;
+    eprintln!("e2e phase: feature branch force-push");
+    run.feature_branch_force_push_propagates()?;
+
+    run.clear_e2e_repositories()?;
+    Ok(())
+}
+
+fn load_e2e_settings() -> Result<E2eSettings> {
+    let env_path = std::env::var_os("REFRAY_E2E_ENV_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".env"));
+    let env = EnvFile::load(&env_path)?;
+    E2eSettings::from_env(&env)
 }
 
 struct EnvFile {
@@ -637,6 +672,218 @@ namespace = "{}"
         Ok(())
     }
 
+    fn rewind_force_push_propagates(&self) -> Result<()> {
+        let repo = self.repo_name("force-rewind");
+        let source = self.primary_provider();
+        self.seed_all_main(&repo, "force rewind base", 1_700_001_701)?;
+        self.sync_repo(&repo, [])?;
+        let base = self.branch_sha(source, &repo, MAIN_BRANCH)?;
+        let old = self.commit_to_provider_branch(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            "old.txt",
+            "old\n",
+            "force rewind old",
+            1_700_001_702,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &old)?;
+        self.unprotect_main_all(&repo)?;
+
+        self.force_push_provider_branch_to_sha(source, &repo, MAIN_BRANCH, &base)?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &base)?;
+        self.assert_backup_bundle_contains(&repo, &old)?;
+        Ok(())
+    }
+
+    fn rewrite_force_push_propagates(&self) -> Result<()> {
+        let repo = self.repo_name("force-rewrite");
+        let source = self.primary_provider();
+        self.seed_all_main(&repo, "force rewrite base", 1_700_001_711)?;
+        self.sync_repo(&repo, [])?;
+        let base = self.branch_sha(source, &repo, MAIN_BRANCH)?;
+        let old = self.commit_to_provider_branch(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            "old.txt",
+            "old\n",
+            "force rewrite old",
+            1_700_001_712,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &old)?;
+        self.unprotect_main_all(&repo)?;
+
+        let rewritten = self.force_rewrite_provider_branch_from(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            &base,
+            "rewritten.txt",
+            "rewritten\n",
+            "force rewrite new",
+            1_700_001_713,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &rewritten)?;
+        self.assert_backup_bundle_contains(&repo, &old)?;
+        Ok(())
+    }
+
+    fn normal_fast_forward_still_syncs(&self) -> Result<()> {
+        let repo = self.repo_name("force-fast-forward");
+        let source = self.primary_provider();
+        self.seed_all_main(&repo, "force fast-forward base", 1_700_001_721)?;
+        self.sync_repo(&repo, [])?;
+
+        let newer = self.commit_to_provider_branch(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            "newer.txt",
+            "newer\n",
+            "normal fast-forward",
+            1_700_001_722,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &newer)
+    }
+
+    fn conflicting_force_pushes_are_not_propagated(&self) -> Result<()> {
+        let repo = self.repo_name("force-conflict");
+        let (source, peer) = self.provider_pair();
+        self.seed_all_main(&repo, "force conflict base", 1_700_001_731)?;
+        self.sync_repo(&repo, [])?;
+        let base = self.branch_sha(source, &repo, MAIN_BRANCH)?;
+        let old = self.commit_to_provider_branch(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            "old.txt",
+            "old\n",
+            "force conflict old",
+            1_700_001_732,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &old)?;
+        self.unprotect_main_all(&repo)?;
+
+        self.force_rewrite_provider_branch_from(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            &base,
+            "source.txt",
+            "source\n",
+            "source force rewrite",
+            1_700_001_733,
+        )?;
+        self.force_rewrite_provider_branch_from(
+            peer,
+            &repo,
+            MAIN_BRANCH,
+            &base,
+            "peer.txt",
+            "peer\n",
+            "peer force rewrite",
+            1_700_001_734,
+        )?;
+        let expected_refs = self.branch_refs_by_provider(&repo, MAIN_BRANCH)?;
+
+        self.write_config(ConflictMode::Fail, Some(&exact_pattern(&repo)), true)?;
+        self.sync_repo_expect_failure(&repo, [])?;
+        self.assert_branch_refs_match(&repo, MAIN_BRANCH, &expected_refs)?;
+        self.write_config(ConflictMode::AutoRebasePullRequest, None, true)?;
+        Ok(())
+    }
+
+    fn force_push_plus_fast_forward_is_not_propagated(&self) -> Result<()> {
+        let repo = self.repo_name("force-plus-fast-forward");
+        let (source, peer) = self.provider_pair();
+        self.seed_all_main(&repo, "force plus fast-forward base", 1_700_001_741)?;
+        self.sync_repo(&repo, [])?;
+        let base = self.branch_sha(source, &repo, MAIN_BRANCH)?;
+        let old = self.commit_to_provider_branch(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            "old.txt",
+            "old\n",
+            "force plus fast-forward old",
+            1_700_001_742,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &old)?;
+        self.unprotect_main_all(&repo)?;
+
+        self.force_rewrite_provider_branch_from(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            &base,
+            "rewritten.txt",
+            "rewritten\n",
+            "force plus fast-forward rewrite",
+            1_700_001_743,
+        )?;
+        self.commit_to_provider_branch(
+            peer,
+            &repo,
+            MAIN_BRANCH,
+            "peer-fast-forward.txt",
+            "peer fast-forward\n",
+            "peer fast-forward",
+            1_700_001_744,
+        )?;
+        let expected_refs = self.branch_refs_by_provider(&repo, MAIN_BRANCH)?;
+
+        self.write_config(ConflictMode::Fail, Some(&exact_pattern(&repo)), true)?;
+        self.sync_repo_expect_failure(&repo, [])?;
+        self.assert_branch_refs_match(&repo, MAIN_BRANCH, &expected_refs)?;
+        self.write_config(ConflictMode::AutoRebasePullRequest, None, true)?;
+        Ok(())
+    }
+
+    fn feature_branch_force_push_propagates(&self) -> Result<()> {
+        let repo = self.repo_name("force-feature");
+        let source = self.primary_provider();
+        let branch = "feature/force-push";
+        self.seed_all_main(&repo, "force feature base", 1_700_001_751)?;
+        self.sync_repo(&repo, [])?;
+        let main = self.branch_sha(source, &repo, MAIN_BRANCH)?;
+        let old_feature = self.create_provider_branch(
+            source,
+            &repo,
+            MAIN_BRANCH,
+            branch,
+            "feature.txt",
+            "feature\n",
+            "feature branch old",
+            1_700_001_752,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, branch, &old_feature)?;
+
+        let rewritten_feature = self.force_rewrite_provider_branch_from(
+            source,
+            &repo,
+            branch,
+            &main,
+            "feature-rewritten.txt",
+            "feature rewritten\n",
+            "feature branch rewrite",
+            1_700_001_753,
+        )?;
+        self.sync_repo(&repo, [])?;
+        self.assert_branch_all_at(&repo, branch, &rewritten_feature)?;
+        self.assert_branch_all_at(&repo, MAIN_BRANCH, &main)?;
+        self.assert_backup_bundle_contains(&repo, &old_feature)?;
+        Ok(())
+    }
+
     fn webhook_commands_and_receiver_work(&self) -> Result<()> {
         let repo = self.repo_name("webhook");
         let source = self.primary_provider();
@@ -763,6 +1010,129 @@ namespace = "{}"
         )?;
         provider.wait_repo_listed(repo)?;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_to_provider_branch(
+        &self,
+        provider: &ProviderAccount,
+        repo: &str,
+        branch: &str,
+        path: &str,
+        contents: &str,
+        message: &str,
+        timestamp: i64,
+    ) -> Result<String> {
+        let work = self.clone_repo(
+            provider,
+            repo,
+            &format!(
+                "commit-{}-{}-{repo}",
+                provider.site_name,
+                sanitize_path(branch)
+            ),
+        )?;
+        self.checkout_remote_branch(&work, branch)?;
+        write_commit(&work, path, contents, message, timestamp)?;
+        let sha = git_output(&work, ["rev-parse", "HEAD"])?;
+        let refspec = format!("HEAD:{branch}");
+        self.git(&work, ["push", "origin", &refspec])?;
+        provider.wait_branch(repo, branch, &sha)?;
+        provider.wait_repo_listed(repo)?;
+        Ok(sha)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_provider_branch(
+        &self,
+        provider: &ProviderAccount,
+        repo: &str,
+        base_branch: &str,
+        branch: &str,
+        path: &str,
+        contents: &str,
+        message: &str,
+        timestamp: i64,
+    ) -> Result<String> {
+        let work = self.clone_repo(
+            provider,
+            repo,
+            &format!(
+                "branch-{}-{}-{repo}",
+                provider.site_name,
+                sanitize_path(branch)
+            ),
+        )?;
+        let base_ref = format!("origin/{base_branch}");
+        self.git(&work, ["checkout", "-B", branch, &base_ref])?;
+        write_commit(&work, path, contents, message, timestamp)?;
+        let sha = git_output(&work, ["rev-parse", "HEAD"])?;
+        let refspec = format!("HEAD:{branch}");
+        self.git(&work, ["push", "origin", &refspec])?;
+        provider.wait_branch(repo, branch, &sha)?;
+        provider.wait_repo_listed(repo)?;
+        Ok(sha)
+    }
+
+    fn force_push_provider_branch_to_sha(
+        &self,
+        provider: &ProviderAccount,
+        repo: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<()> {
+        let work = self.clone_repo(
+            provider,
+            repo,
+            &format!(
+                "force-to-{}-{}-{repo}",
+                provider.site_name,
+                sanitize_path(branch)
+            ),
+        )?;
+        self.checkout_remote_branch(&work, branch)?;
+        self.git(&work, ["reset", "--hard", sha])?;
+        let refspec = format!("HEAD:{branch}");
+        self.git(&work, ["push", "--force", "origin", &refspec])?;
+        provider.wait_branch(repo, branch, sha)?;
+        provider.wait_repo_listed(repo)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn force_rewrite_provider_branch_from(
+        &self,
+        provider: &ProviderAccount,
+        repo: &str,
+        branch: &str,
+        base_sha: &str,
+        path: &str,
+        contents: &str,
+        message: &str,
+        timestamp: i64,
+    ) -> Result<String> {
+        let work = self.clone_repo(
+            provider,
+            repo,
+            &format!(
+                "force-rewrite-{}-{}-{repo}",
+                provider.site_name,
+                sanitize_path(branch)
+            ),
+        )?;
+        self.checkout_remote_branch(&work, branch)?;
+        self.git(&work, ["reset", "--hard", base_sha])?;
+        write_commit(&work, path, contents, message, timestamp)?;
+        let sha = git_output(&work, ["rev-parse", "HEAD"])?;
+        let refspec = format!("HEAD:{branch}");
+        self.git(&work, ["push", "--force", "origin", &refspec])?;
+        provider.wait_branch(repo, branch, &sha)?;
+        provider.wait_repo_listed(repo)?;
+        Ok(sha)
+    }
+
+    fn checkout_remote_branch(&self, work: &Path, branch: &str) -> Result<()> {
+        let remote_branch = format!("origin/{branch}");
+        self.git(work, ["checkout", "-B", branch, &remote_branch])
     }
 
     fn clone_repo(&self, provider: &ProviderAccount, repo: &str, label: &str) -> Result<PathBuf> {
@@ -1058,6 +1428,34 @@ namespace = "{}"
         })
     }
 
+    fn assert_branch_all_at(&self, repo: &str, branch: &str, expected: &str) -> Result<()> {
+        retry("branch convergence to expected tip", || {
+            for (provider, actual) in self.branch_refs_by_provider(repo, branch)? {
+                if actual != expected {
+                    bail!("branch {branch} on {provider} is at {actual}, expected {expected}");
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn assert_branch_refs_match(
+        &self,
+        repo: &str,
+        branch: &str,
+        expected: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        retry("branch refs unchanged", || {
+            let actual = self.branch_refs_by_provider(repo, branch)?;
+            if &actual != expected {
+                bail!(
+                    "branch {branch} refs changed unexpectedly for {repo}: expected {expected:?}, got {actual:?}"
+                );
+            }
+            Ok(())
+        })
+    }
+
     fn assert_branch_all_equal_after_optional_resync(
         &self,
         repo: &str,
@@ -1222,6 +1620,36 @@ namespace = "{}"
             output.insert(provider.site_name.clone(), provider.ls_remote(repo)?);
         }
         Ok(output)
+    }
+
+    fn branch_refs_by_provider(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut output = BTreeMap::new();
+        for (provider, refs) in self.refs_by_provider(repo)? {
+            let sha =
+                refs.branches.get(branch).cloned().ok_or_else(|| {
+                    anyhow!("branch {branch} missing on {provider} for repo {repo}")
+                })?;
+            output.insert(provider, sha);
+        }
+        Ok(output)
+    }
+
+    fn branch_sha(&self, provider: &ProviderAccount, repo: &str, branch: &str) -> Result<String> {
+        provider
+            .ls_remote(repo)?
+            .branches
+            .get(branch)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "branch {branch} missing on {} for repo {repo}",
+                    provider.site_name
+                )
+            })
     }
 
     fn unprotect_main_all(&self, repo: &str) -> Result<()> {

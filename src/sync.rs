@@ -1399,6 +1399,27 @@ fn push_repo_refs(
         fail_on_unresolved_conflict(context, "branch deletion conflict")?;
     }
 
+    let (force_pushes, force_push_conflicts, force_push_branches) =
+        branch_force_push_decisions(mirror_repo, remotes, previous_refs, current_refs)?;
+    let had_force_push_conflicts = !force_push_conflicts.is_empty();
+    for conflict in &force_push_conflicts {
+        crate::logln!(
+            "  {} branch {} has conflicting force-push changes on {} ({}, {})",
+            style("conflict").yellow().bold(),
+            style(&conflict.branch).cyan(),
+            conflict.remotes.join("+"),
+            conflict.reason,
+            style("skipped").dim()
+        );
+    }
+    if had_force_push_conflicts {
+        fail_on_unresolved_conflict(context, "branch force-push conflict")?;
+    }
+    let blocked_branches = blocked_branches
+        .union(&force_push_branches)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
     let (branches, conflicts) = mirror_repo.branch_decisions(remotes)?;
     let branches_to_push = branches
         .into_iter()
@@ -1423,6 +1444,7 @@ fn push_repo_refs(
         }
     }
     let had_branch_conflicts = !unresolved_branch_conflicts.is_empty();
+    let force_push_updates = force_push_updates(&force_pushes);
     let unresolved_branch_names = unresolved_branch_conflicts
         .iter()
         .map(|conflict| conflict.branch.clone())
@@ -1463,13 +1485,17 @@ fn push_repo_refs(
 
     let pushed_branch_names = branch_names(&branches_to_push);
     let rebased_branch_names = branch_names_from_updates(&rebased_branch_updates);
+    let force_pushed_branch_names = branch_names_from_updates(&force_push_updates);
     let mut cleanup_branches = stale_conflict_branches;
     cleanup_branches.retain(|branch| {
-        !pushed_branch_names.contains(branch) && !rebased_branch_names.contains(branch)
+        !pushed_branch_names.contains(branch)
+            && !rebased_branch_names.contains(branch)
+            && !force_pushed_branch_names.contains(branch)
     });
 
     if branches_to_push.is_empty()
         && rebased_branch_updates.is_empty()
+        && force_push_updates.is_empty()
         && tags_to_push.is_empty()
         && unresolved_branch_conflicts.is_empty()
     {
@@ -1499,7 +1525,10 @@ fn push_repo_refs(
         );
         return Ok(RepoRefSyncResult {
             pushed: false,
-            had_conflicts: had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts,
+            had_conflicts: had_branch_conflicts
+                || had_tag_conflicts
+                || had_deletion_conflicts
+                || had_force_push_conflicts,
         });
     }
     if !branch_deletions.is_empty() {
@@ -1522,6 +1551,18 @@ fn push_repo_refs(
         mirror_repo.push_branch_updates(remotes, &rebased_branch_updates)?;
         close_resolved_pull_requests(context, mirror_repo, remotes, repos, &rebased_branch_names)?;
     }
+    if !force_push_updates.is_empty() {
+        print_branch_force_pushes(&force_pushes);
+        backup_force_pushed_branches(context, mirror_repo, repo_name, &force_pushes, current_refs)?;
+        mirror_repo.push_branch_updates(remotes, &force_push_updates)?;
+        close_resolved_pull_requests(
+            context,
+            mirror_repo,
+            remotes,
+            repos,
+            &force_pushed_branch_names,
+        )?;
+    }
     if !tags_to_push.is_empty() {
         print_tag_decisions(&tags_to_push);
         mirror_repo.push_tags(remotes, &tags_to_push)?;
@@ -1541,10 +1582,14 @@ fn push_repo_refs(
     Ok(RepoRefSyncResult {
         pushed: !branches_to_push.is_empty()
             || !rebased_branch_updates.is_empty()
+            || !force_push_updates.is_empty()
             || !tags_to_push.is_empty()
             || !branch_deletions.is_empty()
             || !cleanup_branches.is_empty(),
-        had_conflicts: had_branch_conflicts || had_tag_conflicts || had_deletion_conflicts,
+        had_conflicts: had_branch_conflicts
+            || had_tag_conflicts
+            || had_deletion_conflicts
+            || had_force_push_conflicts,
     })
 }
 
@@ -1572,6 +1617,34 @@ fn backup_deleted_branches(
     }
     let refs = mirror_repo.backup_refs(&backups)?;
     let bundle_path = backup_dir(context, repo_name).join(format!("branches-{stamp}.bundle"));
+    mirror_repo.create_bundle(&bundle_path, &refs)?;
+    Ok(())
+}
+
+fn backup_force_pushed_branches(
+    context: &RepoSyncContext<'_>,
+    mirror_repo: &GitMirror,
+    repo_name: &str,
+    force_pushes: &[BranchForcePush],
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<()> {
+    if context.dry_run {
+        crate::logln!(
+            "  {} {} force-push backup{}",
+            style("dry-run").yellow().bold(),
+            style("would create").dim(),
+            if force_pushes.len() == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
+
+    let stamp = backup_stamp()?;
+    let backups = force_push_ref_backups(force_pushes, current_refs, &stamp);
+    if backups.is_empty() {
+        bail!("cannot back up force-push because no target branch refs were available");
+    }
+    let refs = mirror_repo.backup_refs(&backups)?;
+    let bundle_path = backup_dir(context, repo_name).join(format!("force-push-{stamp}.bundle"));
     mirror_repo.create_bundle(&bundle_path, &refs)?;
     Ok(())
 }
@@ -1696,6 +1769,35 @@ fn log_rebase_decision(branch: &str, sha: &str, updates: &[BranchUpdate]) {
         updates.len(),
         if updates.len() == 1 { "" } else { "es" }
     );
+}
+
+fn print_branch_force_pushes(force_pushes: &[BranchForcePush]) {
+    for force_push in force_pushes {
+        crate::logln!(
+            "  {} branch {} {} -> {}",
+            style("force-push detected").green().bold(),
+            style(&force_push.branch).cyan(),
+            force_push.source_remotes.join("+"),
+            force_push.target_remotes.join("+")
+        );
+    }
+}
+
+fn force_push_updates(force_pushes: &[BranchForcePush]) -> Vec<BranchUpdate> {
+    force_pushes
+        .iter()
+        .flat_map(|force_push| {
+            force_push
+                .target_remotes
+                .iter()
+                .map(|target_remote| BranchUpdate {
+                    branch: force_push.branch.clone(),
+                    sha: force_push.sha.clone(),
+                    target_remote: target_remote.clone(),
+                    force: true,
+                })
+        })
+        .collect()
 }
 
 fn open_conflict_pull_requests(
@@ -1968,6 +2070,38 @@ fn branch_ref_backups(
     backups
 }
 
+fn force_push_ref_backups(
+    force_pushes: &[BranchForcePush],
+    current_refs: &BTreeMap<String, RemoteRefState>,
+    stamp: &str,
+) -> Vec<RefBackup> {
+    let mut backups = Vec::new();
+    for force_push in force_pushes {
+        for remote in &force_push.target_remotes {
+            let Some(sha) = current_refs
+                .get(remote)
+                .and_then(|refs| refs.branches.get(&force_push.branch))
+            else {
+                continue;
+            };
+            backups.push(RefBackup {
+                refname: format!(
+                    "refs/refray-backups/force-pushes/{}/{}/{}",
+                    hex_component(&force_push.branch),
+                    stamp,
+                    hex_component(remote)
+                ),
+                sha: sha.clone(),
+                description: format!(
+                    "branch {} from {} before propagated force-push",
+                    force_push.branch, remote
+                ),
+            });
+        }
+    }
+    backups
+}
+
 fn branches_deleted_everywhere_backups(
     previous_refs: &BTreeMap<String, RemoteRefState>,
     current_refs: &BTreeMap<String, RemoteRefState>,
@@ -2092,6 +2226,146 @@ fn safe_ref_component(value: &str) -> String {
         }
     }
     output.trim_matches('-').to_string()
+}
+
+#[derive(Clone, Debug)]
+struct BranchForcePush {
+    branch: String,
+    sha: String,
+    source_remotes: Vec<String>,
+    target_remotes: Vec<String>,
+}
+
+struct BranchForcePushConflict {
+    branch: String,
+    remotes: Vec<String>,
+    reason: String,
+}
+
+fn branch_force_push_decisions(
+    mirror_repo: &GitMirror,
+    remotes: &[RemoteSpec],
+    previous_refs: Option<&BTreeMap<String, RemoteRefState>>,
+    current_refs: &BTreeMap<String, RemoteRefState>,
+) -> Result<(
+    Vec<BranchForcePush>,
+    Vec<BranchForcePushConflict>,
+    BTreeSet<String>,
+)> {
+    let Some(previous_refs) = previous_refs else {
+        return Ok((Vec::new(), Vec::new(), BTreeSet::new()));
+    };
+    let remote_names = remotes
+        .iter()
+        .map(|remote| remote.name.clone())
+        .collect::<Vec<_>>();
+    let mut branches = BTreeSet::new();
+    for refs in previous_refs.values() {
+        branches.extend(
+            refs.branches
+                .keys()
+                .filter(|branch| !is_internal_conflict_branch(branch))
+                .cloned(),
+        );
+    }
+
+    let mut decisions = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut blocked = BTreeSet::new();
+    for branch in branches {
+        let previous_by_remote = remote_names
+            .iter()
+            .filter_map(|remote| {
+                previous_refs
+                    .get(remote)
+                    .and_then(|refs| refs.branches.get(&branch))
+                    .map(|sha| (remote.clone(), sha.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if previous_by_remote.len() != remote_names.len() {
+            continue;
+        }
+        let previous_tips = previous_by_remote
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if previous_tips.len() != 1 {
+            continue;
+        }
+
+        let current_by_remote = remote_names
+            .iter()
+            .filter_map(|remote| {
+                current_refs
+                    .get(remote)
+                    .and_then(|refs| refs.branches.get(&branch))
+                    .map(|sha| (remote.clone(), sha.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if current_by_remote.len() != remote_names.len() {
+            continue;
+        }
+
+        let mut target_remotes = Vec::new();
+        let mut fast_forward_remotes = Vec::new();
+        let mut force_pushed_by_tip = BTreeMap::<String, Vec<String>>::new();
+        for remote in &remote_names {
+            let previous = &previous_by_remote[remote];
+            let current = &current_by_remote[remote];
+            if previous == current {
+                target_remotes.push(remote.clone());
+            } else if mirror_repo.is_ancestor(previous, current)? {
+                fast_forward_remotes.push(remote.clone());
+            } else {
+                force_pushed_by_tip
+                    .entry(current.clone())
+                    .or_default()
+                    .push(remote.clone());
+            }
+        }
+
+        if force_pushed_by_tip.is_empty() {
+            continue;
+        }
+
+        let force_pushed_remotes = force_pushed_by_tip
+            .values()
+            .flat_map(|remotes| remotes.iter().cloned())
+            .collect::<Vec<_>>();
+        if force_pushed_by_tip.len() == 1 && fast_forward_remotes.is_empty() {
+            let (sha, source_remotes) = force_pushed_by_tip.into_iter().next().unwrap();
+            if target_remotes.is_empty() {
+                continue;
+            }
+            blocked.insert(branch.clone());
+            decisions.push(BranchForcePush {
+                branch,
+                sha,
+                source_remotes,
+                target_remotes,
+            });
+            continue;
+        }
+
+        blocked.insert(branch.clone());
+        let reason = if force_pushed_by_tip.len() > 1 && !fast_forward_remotes.is_empty() {
+            format!(
+                "multiple rewritten tips and fast-forward changes on {}",
+                fast_forward_remotes.join("+")
+            )
+        } else if force_pushed_by_tip.len() > 1 {
+            "multiple rewritten tips".to_string()
+        } else {
+            format!("also fast-forwarded on {}", fast_forward_remotes.join("+"))
+        };
+        conflicts.push(BranchForcePushConflict {
+            branch,
+            remotes: force_pushed_remotes,
+            reason,
+        });
+    }
+
+    Ok((decisions, conflicts, blocked))
 }
 
 struct BranchDeletionConflict {
