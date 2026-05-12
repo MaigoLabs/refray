@@ -129,6 +129,7 @@ fn add_sync_group_styled(config: &mut Config, theme: &ColorfulTheme) -> Result<(
         delete_missing,
         visibility: Visibility::Private,
         conflict_resolution,
+        allow_temporary_gitlab_force_push: true,
     });
     prompt_webhook_setup_styled(config, theme)?;
 

@@ -118,6 +118,7 @@ fn matches_jobs_by_provider_and_namespace() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -146,6 +147,7 @@ fn matching_jobs_respects_repo_name_filters() {
         delete_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
+        allow_temporary_gitlab_force_push: true,
     };
     let config = Config {
         jobs: crate::config::DEFAULT_JOBS,
@@ -365,6 +367,7 @@ fn uninstall_webhooks_skips_blocked_provider_access() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -719,6 +722,7 @@ fn filtered_mirror() -> MirrorConfig {
         delete_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
+        allow_temporary_gitlab_force_push: true,
     }
 }
 

@@ -12,7 +12,7 @@ Created becasue github is so unusable and [unreliable](https://red-squares.cian.
 - **read-write mirrors**: Make changes from any provider, and the changes will sync to the others
 - **webhook support**: Sync right after push, reduce potential divergence window
 - **conflict handling**: Rebase or open pull requests when two platforms diverge
-- **tracks deletions**: Branches/repo deletions sync across platforms (with backup) 
+- **tracks state**: Branches/repo deletions and force pushes also sync across platforms (with backup)
 - **selective sync**: Sync subset of repos by regex white/black list, or by private/public visibility
 - **multithreaded**: Process multiple repos simultaneously!
 
@@ -210,6 +210,11 @@ refray webhook update https://new.example.com/webhook
 
 Issues and pull requests are not mirrored.
 
+## TODO
+
+- [ ] Sync releases and released assets
+
+
 <!-- ## Sync Semantics
 
 Each mirror group is treated as a set of equivalent namespaces. Repositories are matched by repository name across all endpoints.
@@ -237,6 +242,8 @@ Conflict resolution strategies are configured per mirror group:
 - `auto_rebase`: rebase divergent commits in endpoint order into one branch history, push fast-forward updates normally, and force-push only endpoints whose original tip was rewritten. If rebase hits a file conflict, fail.
 - `pull_request`: push temporary `refray/conflicts/...` branches and open provider pull requests/merge requests so a person can resolve the divergence.
 - `auto_rebase_pull_request`: try `auto_rebase` first, then fall back to pull requests if rebase hits a conflict.
+
+GitLab protected branches reject force-pushes unless the protected branch rule allows them. By default, `refray` temporarily enables GitLab project-level force-push permission for protected branches it already knows it must force-push, then restores the prior setting immediately afterward. Set `allow_temporary_gitlab_force_push = false` on a mirror group to disable this behavior.
 
 When a previously opened conflict pull request is merged, the next sync sees the merged branch as the winning tip, pushes it to the other endpoints, and closes stale `refray/conflicts/...` pull requests for that branch.
 

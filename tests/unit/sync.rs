@@ -449,6 +449,73 @@ fn endpoint_remote_names_do_not_slug_collide() {
 }
 
 #[test]
+fn temporary_gitlab_force_push_targets_selects_only_gitlab_force_updates() {
+    let mirror = MirrorConfig {
+        endpoints: vec![endpoint("github"), endpoint("gitlab"), endpoint("gitea")],
+        ..test_mirror()
+    };
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![
+            site_config("github", crate::config::ProviderKind::Github),
+            site_config("gitlab", crate::config::ProviderKind::Gitlab),
+            site_config("gitea", crate::config::ProviderKind::Gitea),
+        ],
+        mirrors: vec![mirror.clone()],
+        webhook: None,
+    };
+    let context = RepoSyncContext {
+        config: &config,
+        mirror: &mirror,
+        work_dir: Path::new("."),
+        redactor: Redactor::new(Vec::new()),
+        dry_run: false,
+        jobs: crate::config::DEFAULT_JOBS,
+    };
+    let updates = vec![
+        BranchUpdate {
+            branch: "main".to_string(),
+            sha: "a".repeat(40),
+            target_remote: remote_key("gitlab"),
+            force: true,
+        },
+        BranchUpdate {
+            branch: "main".to_string(),
+            sha: "a".repeat(40),
+            target_remote: remote_key("gitlab"),
+            force: true,
+        },
+        BranchUpdate {
+            branch: "feature".to_string(),
+            sha: "b".repeat(40),
+            target_remote: remote_key("gitlab"),
+            force: false,
+        },
+        BranchUpdate {
+            branch: "main".to_string(),
+            sha: "c".repeat(40),
+            target_remote: remote_key("github"),
+            force: true,
+        },
+    ];
+    let repos = vec![
+        endpoint_repo("github"),
+        endpoint_repo("gitlab"),
+        endpoint_repo("gitea"),
+    ];
+
+    let targets = temporary_gitlab_force_push_targets(&context, &repos, &updates).unwrap();
+
+    assert_eq!(
+        targets,
+        vec![GitlabForcePushTarget {
+            endpoint: endpoint("gitlab"),
+            branch: "main".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn targeted_endpoint_repos_synthesize_clone_urls_without_listing() {
     let mirror = MirrorConfig {
         name: "sync-1".to_string(),
@@ -464,6 +531,7 @@ fn targeted_endpoint_repos_synthesize_clone_urls_without_listing() {
         delete_missing: true,
         visibility: crate::config::Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
+        allow_temporary_gitlab_force_push: true,
     };
     let config = Config {
         jobs: crate::config::DEFAULT_JOBS,
@@ -603,6 +671,7 @@ fn test_mirror() -> MirrorConfig {
         delete_missing: true,
         visibility: crate::config::Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
+        allow_temporary_gitlab_force_push: true,
     }
 }
 
@@ -616,6 +685,17 @@ fn endpoint(site: &str) -> EndpointConfig {
 
 fn remote_key(site: &str) -> String {
     remote_name_for_endpoint(&endpoint(site))
+}
+
+fn site_config(name: &str, provider: crate::config::ProviderKind) -> crate::config::SiteConfig {
+    crate::config::SiteConfig {
+        name: name.to_string(),
+        provider,
+        base_url: format!("https://{name}.invalid"),
+        api_url: None,
+        token: crate::config::TokenConfig::Value("token".to_string()),
+        git_username: None,
+    }
 }
 
 fn endpoint_repo(site: &str) -> EndpointRepo {

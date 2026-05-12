@@ -687,6 +687,119 @@ fn delete_repo_deletes_url_encoded_gitlab_project() {
 }
 
 #[test]
+fn gitlab_protected_branch_allow_force_push_reads_setting() {
+    let (api_url, handle) = one_request_server(
+        "200 OK",
+        r#"{"name":"main","allow_force_push":false}"#,
+        |request| {
+            assert!(
+                request.starts_with("GET /projects/parent%2Falice%2Frepo/protected_branches/main "),
+                "request was {request}"
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("private-token: secret"),
+                "request was {request}"
+            );
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    let allow = ProviderClient::new(&site)
+        .unwrap()
+        .gitlab_protected_branch_allow_force_push(
+            &EndpointConfig {
+                site: "gitlab".to_string(),
+                kind: NamespaceKind::Group,
+                namespace: "parent/alice".to_string(),
+            },
+            "repo",
+            "main",
+        )
+        .unwrap();
+
+    assert_eq!(allow, Some(false));
+    handle.join().unwrap();
+}
+
+#[test]
+fn gitlab_protected_branch_allow_force_push_treats_404_as_unprotected() {
+    let (api_url, handle) = one_request_server(
+        "404 Not Found",
+        r#"{"message":"404 Not found"}"#,
+        |request| {
+            assert!(
+                request
+                    .starts_with("GET /projects/alice%2Frepo/protected_branches/feature%2Fsync "),
+                "request was {request}"
+            );
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    let allow = ProviderClient::new(&site)
+        .unwrap()
+        .gitlab_protected_branch_allow_force_push(
+            &EndpointConfig {
+                site: "gitlab".to_string(),
+                kind: NamespaceKind::User,
+                namespace: "alice".to_string(),
+            },
+            "repo",
+            "feature/sync",
+        )
+        .unwrap();
+
+    assert_eq!(allow, None);
+    handle.join().unwrap();
+}
+
+#[test]
+fn set_gitlab_protected_branch_allow_force_push_patches_branch() {
+    let (api_url, handle) = one_request_server(
+        "200 OK",
+        r#"{"name":"main","allow_force_push":true}"#,
+        |request| {
+            assert!(
+                request
+                    .starts_with("PATCH /projects/parent%2Falice%2Frepo/protected_branches/main "),
+                "request was {request}"
+            );
+            assert!(
+                request.contains(r#"{"allow_force_push":true}"#),
+                "request was {request}"
+            );
+        },
+    );
+    let site = SiteConfig {
+        api_url: Some(api_url),
+        ..site(ProviderKind::Gitlab, None)
+    };
+
+    ProviderClient::new(&site)
+        .unwrap()
+        .set_gitlab_protected_branch_allow_force_push(
+            &EndpointConfig {
+                site: "gitlab".to_string(),
+                kind: NamespaceKind::Group,
+                namespace: "parent/alice".to_string(),
+            },
+            "repo",
+            "main",
+            true,
+        )
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
 fn delete_repo_deletes_gitea_repo() {
     let (api_url, handle) = one_request_server("204 No Content", "", |request| {
         assert!(

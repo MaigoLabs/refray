@@ -68,6 +68,8 @@ pub struct MirrorConfig {
     pub visibility: Visibility,
     #[serde(default)]
     pub conflict_resolution: ConflictResolutionStrategy,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub allow_temporary_gitlab_force_push: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -193,6 +195,10 @@ fn compile_repo_pattern(
 
 fn default_true() -> bool {
     true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn default_jobs() -> usize {

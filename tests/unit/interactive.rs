@@ -258,6 +258,7 @@ fn wizard_starts_existing_config_at_sync_group_menu() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -288,6 +289,7 @@ fn wizard_can_ask_to_run_full_sync_after_config() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -365,6 +367,7 @@ fn wizard_edits_existing_sync_group_from_menu() {
             delete_missing: true,
             visibility: Visibility::Public,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -456,6 +459,7 @@ fn wizard_prefills_existing_sync_group_when_editing() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -521,6 +525,7 @@ fn wizard_deletes_existing_sync_group_from_menu() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -581,6 +586,7 @@ fn wizard_can_go_back_from_delete_menu() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };

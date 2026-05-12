@@ -79,6 +79,7 @@ where
         delete_missing,
         visibility: Visibility::Private,
         conflict_resolution,
+        allow_temporary_gitlab_force_push: true,
     });
     prompt_webhook_setup(reader, writer, config)?;
     Ok(())

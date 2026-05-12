@@ -40,6 +40,11 @@ pub struct PullRequestInfo {
     pub url: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct GitlabProtectedBranch {
+    allow_force_push: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebhookInstallOutcome {
     Created,
@@ -183,6 +188,38 @@ impl<'a> ProviderClient<'a> {
             gitlab => self.gitlab_set_default_branch(endpoint, repo_name, branch),
             gitea_like => self.gitea_set_default_branch(endpoint, repo_name, branch),
         )
+    }
+
+    pub fn gitlab_protected_branch_allow_force_push(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+    ) -> Result<Option<bool>> {
+        if self.site.provider != ProviderKind::Gitlab {
+            bail!("protected branch force-push lookup is only supported for GitLab");
+        }
+        let url = self.gitlab_protected_branch_url(endpoint, repo_name, branch);
+        match self.get_json::<GitlabProtectedBranch>(&url) {
+            Ok(protected_branch) => Ok(Some(protected_branch.allow_force_push)),
+            Err(error) if is_not_found_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn set_gitlab_protected_branch_allow_force_push(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+        allow_force_push: bool,
+    ) -> Result<()> {
+        if self.site.provider != ProviderKind::Gitlab {
+            bail!("protected branch force-push update is only supported for GitLab");
+        }
+        let url = self.gitlab_protected_branch_url(endpoint, repo_name, branch);
+        self.patch_json::<serde_json::Value>(&url, &json!({ "allow_force_push": allow_force_push }))
+            .map(|_| ())
     }
 
     pub fn install_webhook(
@@ -910,6 +947,19 @@ impl<'a> ProviderClient<'a> {
         format!(
             "{}/merge_requests",
             self.gitlab_project_url(endpoint, repo_name)
+        )
+    }
+
+    fn gitlab_protected_branch_url(
+        &self,
+        endpoint: &EndpointConfig,
+        repo_name: &str,
+        branch: &str,
+    ) -> String {
+        format!(
+            "{}/protected_branches/{}",
+            self.gitlab_project_url(endpoint, repo_name),
+            urlencoding(branch)
         )
     }
 

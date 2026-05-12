@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use console::style;
 use regex::Regex;
 
@@ -656,6 +656,19 @@ struct RepoSyncContext<'a> {
     redactor: Redactor,
     dry_run: bool,
     jobs: usize,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct GitlabForcePushTarget {
+    endpoint: EndpointConfig,
+    branch: String,
+}
+
+#[derive(Clone, Debug)]
+struct GitlabForcePushToggle {
+    endpoint: EndpointConfig,
+    branch: String,
+    previous_allow_force_push: bool,
 }
 
 #[derive(Default)]
@@ -1548,13 +1561,27 @@ fn push_repo_refs(
         close_resolved_pull_requests(context, mirror_repo, remotes, repos, &pushed_branch_names)?;
     }
     if !rebased_branch_updates.is_empty() {
-        mirror_repo.push_branch_updates(remotes, &rebased_branch_updates)?;
+        push_branch_updates_with_temporary_gitlab_force_push(
+            context,
+            mirror_repo,
+            repo_name,
+            remotes,
+            repos,
+            &rebased_branch_updates,
+        )?;
         close_resolved_pull_requests(context, mirror_repo, remotes, repos, &rebased_branch_names)?;
     }
     if !force_push_updates.is_empty() {
         print_branch_force_pushes(&force_pushes);
         backup_force_pushed_branches(context, mirror_repo, repo_name, &force_pushes, current_refs)?;
-        mirror_repo.push_branch_updates(remotes, &force_push_updates)?;
+        push_branch_updates_with_temporary_gitlab_force_push(
+            context,
+            mirror_repo,
+            repo_name,
+            remotes,
+            repos,
+            &force_push_updates,
+        )?;
         close_resolved_pull_requests(
             context,
             mirror_repo,
@@ -1798,6 +1825,172 @@ fn force_push_updates(force_pushes: &[BranchForcePush]) -> Vec<BranchUpdate> {
                 })
         })
         .collect()
+}
+
+fn push_branch_updates_with_temporary_gitlab_force_push(
+    context: &RepoSyncContext<'_>,
+    mirror_repo: &GitMirror,
+    repo_name: &str,
+    remotes: &[RemoteSpec],
+    repos: &[EndpointRepo],
+    updates: &[BranchUpdate],
+) -> Result<()> {
+    let toggles = enable_temporary_gitlab_force_push(context, repo_name, repos, updates)?;
+    let push_result = mirror_repo.push_branch_updates(remotes, updates);
+    let restore_result = restore_temporary_gitlab_force_push(context, repo_name, &toggles);
+
+    match (push_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(push_error), Err(restore_error)) => Err(anyhow!(
+            "git push failed and failed to restore temporary GitLab force-push permissions: {push_error:#}; restore error: {restore_error:#}"
+        )),
+    }
+}
+
+fn enable_temporary_gitlab_force_push(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    repos: &[EndpointRepo],
+    updates: &[BranchUpdate],
+) -> Result<Vec<GitlabForcePushToggle>> {
+    if !context.mirror.allow_temporary_gitlab_force_push || context.dry_run {
+        return Ok(Vec::new());
+    }
+
+    let mut toggles = Vec::new();
+    for target in temporary_gitlab_force_push_targets(context, repos, updates)? {
+        let result = enable_temporary_gitlab_force_push_for_target(context, repo_name, target);
+        match result {
+            Ok(Some(toggle)) => toggles.push(toggle),
+            Ok(None) => {}
+            Err(error) => {
+                let restore_result =
+                    restore_temporary_gitlab_force_push(context, repo_name, &toggles);
+                return match restore_result {
+                    Ok(()) => Err(error),
+                    Err(restore_error) => Err(anyhow!(
+                        "failed to enable temporary GitLab force-push permissions: {error:#}; restore error: {restore_error:#}"
+                    )),
+                };
+            }
+        }
+    }
+    Ok(toggles)
+}
+
+fn enable_temporary_gitlab_force_push_for_target(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    target: GitlabForcePushTarget,
+) -> Result<Option<GitlabForcePushToggle>> {
+    let site = context.config.site(&target.endpoint.site).unwrap();
+    let client = ProviderClient::new(site)?;
+    let label = target.endpoint.label();
+    match client
+        .gitlab_protected_branch_allow_force_push(&target.endpoint, repo_name, &target.branch)
+        .with_context(|| {
+            format!(
+                "failed to inspect GitLab protected branch {} on {}",
+                target.branch, label
+            )
+        })? {
+        None | Some(true) => Ok(None),
+        Some(false) => {
+            crate::logln!(
+                "  {} branch {} on {}",
+                style("allow force-push").cyan().bold(),
+                style(&target.branch).cyan(),
+                style(&label).dim()
+            );
+            client
+                .set_gitlab_protected_branch_allow_force_push(
+                    &target.endpoint,
+                    repo_name,
+                    &target.branch,
+                    true,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to allow GitLab force-push for branch {} on {}",
+                        target.branch, label
+                    )
+                })?;
+            Ok(Some(GitlabForcePushToggle {
+                endpoint: target.endpoint,
+                branch: target.branch,
+                previous_allow_force_push: false,
+            }))
+        }
+    }
+}
+
+fn restore_temporary_gitlab_force_push(
+    context: &RepoSyncContext<'_>,
+    repo_name: &str,
+    toggles: &[GitlabForcePushToggle],
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for toggle in toggles.iter().rev() {
+        let site = context.config.site(&toggle.endpoint.site).unwrap();
+        let label = toggle.endpoint.label();
+        crate::logln!(
+            "  {} branch {} on {}",
+            style("restore force-push").cyan().bold(),
+            style(&toggle.branch).cyan(),
+            style(&label).dim()
+        );
+        let result = ProviderClient::new(site).and_then(|client| {
+            client.set_gitlab_protected_branch_allow_force_push(
+                &toggle.endpoint,
+                repo_name,
+                &toggle.branch,
+                toggle.previous_allow_force_push,
+            )
+        });
+        if let Err(error) = result {
+            failures.push(format!("branch {} on {}: {error:#}", toggle.branch, label));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "failed to restore temporary GitLab force-push permissions: {}",
+            failures.join("; ")
+        )
+    }
+}
+
+fn temporary_gitlab_force_push_targets(
+    context: &RepoSyncContext<'_>,
+    repos: &[EndpointRepo],
+    updates: &[BranchUpdate],
+) -> Result<Vec<GitlabForcePushTarget>> {
+    let repos_by_remote = endpoint_repos_by_remote_name(context, repos)?;
+    let mut seen = BTreeSet::new();
+    let mut targets = Vec::new();
+
+    for update in updates.iter().filter(|update| update.force) {
+        let Some(endpoint_repo) = repos_by_remote.get(&update.target_remote) else {
+            continue;
+        };
+        let site = context.config.site(&endpoint_repo.endpoint.site).unwrap();
+        if site.provider != ProviderKind::Gitlab {
+            continue;
+        }
+        let target = GitlabForcePushTarget {
+            endpoint: endpoint_repo.endpoint.clone(),
+            branch: update.branch.clone(),
+        };
+        if seen.insert(target.clone()) {
+            targets.push(target);
+        }
+    }
+
+    Ok(targets)
 }
 
 fn open_conflict_pull_requests(

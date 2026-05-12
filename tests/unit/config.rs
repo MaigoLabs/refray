@@ -59,6 +59,7 @@ fn parses_value_tokens() {
         Some("-archive$".to_string())
     );
     assert!(!config.mirrors[0].delete_missing);
+    assert!(config.mirrors[0].allow_temporary_gitlab_force_push);
     let webhook = config.webhook.unwrap();
     assert!(webhook.install);
     assert_eq!(webhook.url, "https://mirror.example.test/webhook");
@@ -116,6 +117,49 @@ fn mirror_defaults_to_deleting_missing_repos_for_existing_configs() {
     .unwrap();
 
     assert!(config.mirrors[0].delete_missing);
+    assert!(config.mirrors[0].allow_temporary_gitlab_force_push);
+}
+
+#[test]
+fn mirror_can_disable_temporary_gitlab_force_push() {
+    let config: Config = toml::from_str(
+        r#"
+        [[mirrors]]
+        name = "personal"
+        allow_temporary_gitlab_force_push = false
+
+        [[mirrors.endpoints]]
+        site = "github"
+        kind = "user"
+        namespace = "alice"
+
+        [[mirrors.endpoints]]
+        site = "gitlab"
+        kind = "group"
+        namespace = "acme"
+        "#,
+    )
+    .unwrap();
+
+    assert!(!config.mirrors[0].allow_temporary_gitlab_force_push);
+}
+
+#[test]
+fn mirror_serializes_temporary_gitlab_force_push_opt_out() {
+    let mut mirror = mirror_config();
+    mirror.allow_temporary_gitlab_force_push = false;
+    let config = Config {
+        jobs: crate::config::DEFAULT_JOBS,
+        sites: vec![site("github", ProviderKind::Github)],
+        mirrors: vec![mirror],
+        webhook: None,
+    };
+
+    let encoded = toml::to_string(&config).unwrap();
+    let decoded: Config = toml::from_str(&encoded).unwrap();
+
+    assert!(encoded.contains("allow_temporary_gitlab_force_push = false"));
+    assert!(!decoded.mirrors[0].allow_temporary_gitlab_force_push);
 }
 
 #[test]
@@ -137,6 +181,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -167,6 +212,7 @@ fn validation_rejects_unknown_sites_and_single_endpoint_groups() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -272,6 +318,7 @@ fn validation_rejects_duplicate_mirror_endpoints() {
             delete_missing: true,
             visibility: Visibility::Private,
             conflict_resolution: ConflictResolutionStrategy::Fail,
+            allow_temporary_gitlab_force_push: true,
         }],
         webhook: None,
     };
@@ -319,6 +366,7 @@ fn mirror_config() -> MirrorConfig {
         delete_missing: true,
         visibility: Visibility::Private,
         conflict_resolution: ConflictResolutionStrategy::Fail,
+        allow_temporary_gitlab_force_push: true,
     }
 }
 
