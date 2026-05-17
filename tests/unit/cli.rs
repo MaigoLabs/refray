@@ -8,6 +8,16 @@ fn cli_config_opens_wizard() {
 }
 
 #[test]
+fn cli_prints_version() {
+    let error = Cli::try_parse_from(["refray", "--version"]).unwrap_err();
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    let output = error.to_string();
+    assert!(output.contains(env!("CARGO_PKG_VERSION")));
+    assert!(output.contains(env!("REFRAY_BUILD_TIME")));
+}
+
+#[test]
 fn cli_rejects_removed_config_subcommands() {
     for args in [
         ["refray", "config", "wizard"].as_slice(),

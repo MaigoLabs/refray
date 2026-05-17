@@ -22,6 +22,7 @@ use crate::webhook::{
 
 #[derive(Parser, Debug)]
 #[command(name = "refray")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (built ", env!("REFRAY_BUILD_TIME"), ")"))]
 #[command(about = "Mirror repositories between Git hosting providers")]
 struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
