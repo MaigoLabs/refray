@@ -26,6 +26,9 @@ tiny_http = "0.12"
 toml = "1.1"
 url = "2.5"
 
+[build-dependencies]
+time = { version = "0.3", features = ["formatting"] }
+
 [[test]]
 name = "sequential"
 path = "tests/e2e/sequential.rs"
