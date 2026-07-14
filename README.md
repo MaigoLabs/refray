@@ -6,7 +6,7 @@
 
 A tool to keep your repos in sync across all git platforms, while being able to work from everywhere all at once. 
 
-Created becasue github is so unusable and [unreliable](https://red-squares.cian.lol/) and I want to leave, but I don't want to leave the community behind.
+Created because github is so unusable and [unreliable](https://red-squares.cian.lol/) and I want to leave, but I don't want to leave the community behind.
 
 - **∞-side sync**: Sync between any number of hosted/self-hosted git accounts/orgs/groups
 - **read-write mirrors**: Make changes from any provider, and the changes will sync to the others
